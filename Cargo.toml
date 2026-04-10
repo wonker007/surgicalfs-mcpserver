@@ -1,0 +1,43 @@
+[package]
+name = "surgicalfs-mcp"
+version = "0.4.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/wonker007/surgicalfs-mcpserver"
+description = "High-performance, context-efficient filesystem MCP server"
+
+[dependencies]
+rmcp = { version = "1", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+serde_json_path = "0.7"
+toml = "0.8"
+regex = "1"
+glob = "0.3"
+sha2 = "0.10"
+md-5 = "0.10"
+blake3 = "1"
+encoding_rs = "0.8"
+dirs = "6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+walkdir = "2"
+ignore = "0.4"
+dunce = "1"
+csv = "1"
+pdf-extract = "0.7"
+dotext = "0.1"
+calamine = { version = "0.26", features = ["chrono"] }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1

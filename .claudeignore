@@ -1,0 +1,6 @@
+﻿target/
+*.exe
+*.pdb
+*.dll
+.git/
+node_modules/

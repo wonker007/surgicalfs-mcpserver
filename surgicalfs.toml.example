@@ -1,0 +1,114 @@
+# ============================================================================
+# SurgicalFS MCP Server Configuration
+# ============================================================================
+# Place this file next to surgicalfs-mcp.exe, or at:
+#   %APPDATA%\surgicalfs-mcp\config.toml
+#
+# Or specify via CLI: surgicalfs-mcp.exe --config "C:\path\to\surgicalfs.toml"
+# ============================================================================
+
+[security]
+# REQUIRED: At least one directory must be allowlisted.
+# The server will ONLY access files within these directories.
+# Use double backslashes for Windows paths.
+allowed_directories = [
+    "C:\\Users\\James\\Projects",
+    "C:\\Users\\James\\Documents\\Notes",
+]
+
+# Whether to follow symbolic links (default: false)
+# Setting this to false blocks symlink-based directory traversal attacks.
+follow_symlinks = false
+
+# Maximum file size in bytes for read operations (default: 5MB)
+# Files exceeding this will return an error with a suggestion to use
+# partial-read tools like file_read_lines or json_query.
+max_file_size = 5_242_880
+
+# Read-only mode: disable all write/mutation tools (default: false)
+# Can also be set via CLI: surgicalfs-mcp --read-only
+# read_only = false
+
+[search]
+# Path to ripgrep (rg) binary.
+# "auto" = check PATH, then check next to this exe, then fall back to
+#           PowerShell Select-String
+# Or specify an absolute path: "C:\\tools\\rg.exe"
+ripgrep_path = "auto"
+
+# Maximum search results returned per file_search call
+max_results = 100
+
+# Lines of context shown around each search match
+default_context_lines = 2
+
+# Respect .gitignore files during search and directory listing (default: true)
+# When true, search results and directory listings skip gitignored paths.
+# Individual tool calls can override this with show_ignored=true.
+respect_gitignore = true
+
+[defaults]
+# Default line count for file_head operations
+head_lines = 50
+
+# Default line count for file_tail operations
+tail_lines = 50
+
+# Maximum lines allowed in a single file_read_lines call
+# Prevents accidentally loading huge ranges into context
+max_read_lines = 500
+
+# Text encoding: "utf-8", "utf-8-bom", "latin-1", or "auto"
+# "auto" = try UTF-8, detect BOM, fall back to Windows-1252
+encoding = "auto"
+
+[response_budget]
+# ============================================================================
+# CONTEXT WINDOW PROTECTION
+# These settings cap the size of ANY tool response before it enters
+# Claude Desktop's context window. This is a hard server-side limit.
+# ============================================================================
+
+# Maximum lines in any single tool response (0 = unlimited)
+max_response_lines = 200
+
+# Maximum bytes in any single tool response (0 = unlimited)
+max_response_bytes = 32_768
+
+# How to truncate when over budget:
+#   "smart" = cut at the nearest line break before the limit (clean output)
+#   "hard"  = cut at exact byte offset (may split mid-line)
+truncation_mode = "smart"
+
+[tools]
+# ============================================================================
+# TOOL CATEGORY SELECTION
+# Control which tool categories are registered. Reducing tool count lowers
+# context window overhead from tool definitions (~250-500 tokens per tool).
+# Default: all categories enabled (47 tools, ~14K tokens).
+# ============================================================================
+#
+# Available categories:
+#   inspect      - file_info, file_head, file_tail, file_read_lines (4 tools)
+#   search       - file_search, file_grep, file_search_replace_preview (3 tools)
+#   mutate       - file_replace, file_insert, file_append, file_patch_lines, file_batch_edit (5 tools)
+#   json         - json_query, json_mutate (2 tools)
+#   csv          - csv_info, csv_read, csv_query, csv_write (4 tools)
+#   document     - pdf_info, pdf_extract, docx_extract (3 tools)
+#   spreadsheet  - xlsx_info, xlsx_read, xlsx_query (3 tools)
+#   manage       - file_write, file_write_chunked, file_write_stream, file_copy, file_delete, file_move (6 tools)
+#   directory    - directory_list, directory_tree (2 tools)
+#   utility      - file_checksum (1 tool)
+#   compat       - 14 drop-in replacements for the default MCP filesystem server
+#
+# Examples:
+#   All tools (default):
+#     # enable = [...]   (omit the field entirely)
+#
+#   Core only (~17 tools, ~5K tokens, fits Cursor's 40-tool limit):
+#     enable = ["inspect", "search", "mutate", "manage", "directory", "utility"]
+#
+#   Core + structured formats (~29 tools, ~9K tokens):
+#     enable = ["inspect", "search", "mutate", "json", "csv", "document", "spreadsheet", "manage", "directory", "utility"]
+#
+# enable = ["inspect", "search", "mutate", "manage", "directory", "utility"]

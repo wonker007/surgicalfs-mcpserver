@@ -1,0 +1,822 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SurgicalFS — Configuration Generator</title>
+<style>
+:root {
+  --bg: #ffffff;
+  --bg-surface: #f6f8fa;
+  --bg-code: #f0f2f5;
+  --bg-input: #ffffff;
+  --border: #d1d5db;
+  --border-light: #e5e7eb;
+  --text: #1f2937;
+  --text-muted: #6b7280;
+  --text-dim: #9ca3af;
+  --accent: #0d9488;
+  --accent-light: #ccfbf1;
+  --accent-border: #14b8a6;
+  --danger: #dc2626;
+  --danger-bg: #fef2f2;
+  --warn: #d97706;
+  --green: #16a34a;
+  --amber: #d97706;
+  --red: #dc2626;
+  --toggle-bg: #d1d5db;
+  --toggle-bg-on: #0d9488;
+  --toggle-knob: #ffffff;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+[data-theme="dark"] {
+  --bg: #0f1117;
+  --bg-surface: #1a1d27;
+  --bg-code: #1e2130;
+  --bg-input: #1a1d27;
+  --border: #2d3140;
+  --border-light: #252836;
+  --text: #e5e7eb;
+  --text-muted: #9ca3af;
+  --text-dim: #6b7280;
+  --accent: #2dd4bf;
+  --accent-light: #0d3d38;
+  --accent-border: #14b8a6;
+  --danger: #f87171;
+  --danger-bg: #3b1111;
+  --toggle-bg: #374151;
+  --toggle-bg-on: #0d9488;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+}
+.container { max-width: 900px; margin: 0 auto; padding: 0 24px 80px; }
+
+/* Header */
+.header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 24px 0 16px; border-bottom: 1px solid var(--border-light);
+  margin-bottom: 8px;
+}
+.header-left h1 { font-family: var(--font-mono); font-size: 24px; font-weight: 700; }
+.header-left .subtitle { color: var(--text-muted); font-size: 14px; margin-top: 2px; }
+.header-right { display: flex; align-items: center; gap: 12px; }
+.version-badge {
+  font-family: var(--font-mono); font-size: 12px; padding: 2px 8px;
+  border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted);
+}
+.theme-toggle {
+  background: none; border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; cursor: pointer; color: var(--text-muted); font-size: 16px;
+  transition: border-color 150ms;
+}
+.theme-toggle:hover { border-color: var(--accent); }
+
+/* Sections */
+.section { margin-top: 32px; }
+.section-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+
+/* Directories */
+.dir-input-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.dir-input-row input {
+  flex: 1; font-family: var(--font-mono); font-size: 14px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg-input);
+  color: var(--text); outline: none;
+}
+.dir-input-row input:focus { border-color: var(--accent); }
+.dir-input-row button, .btn {
+  font-family: var(--font-sans); font-size: 14px; padding: 8px 16px;
+  background: var(--accent); color: #fff; border: none; border-radius: 4px;
+  cursor: pointer; white-space: nowrap;
+}
+.dir-input-row button:hover, .btn:hover { opacity: 0.9; }
+.dir-error { color: var(--danger); font-size: 13px; margin-top: 4px; min-height: 20px; }
+.dir-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.dir-chip {
+  font-family: var(--font-mono); font-size: 13px; padding: 4px 10px;
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 4px;
+  display: flex; align-items: center; gap: 6px;
+}
+.dir-chip button {
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 0;
+}
+.dir-chip button:hover { color: var(--danger); }
+.dir-warning { color: var(--warn); font-size: 13px; margin-top: 8px; }
+
+/* Profile cards */
+.profiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.profile-card {
+  border: 2px solid var(--border); border-radius: 6px; padding: 16px;
+  cursor: pointer; transition: border-color 150ms;
+}
+.profile-card:hover { border-color: var(--text-muted); }
+.profile-card.active { border-color: var(--accent-border); background: var(--accent-light); }
+.profile-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.profile-card .meta { font-family: var(--font-mono); font-size: 12px; color: var(--accent); margin-bottom: 6px; }
+.profile-card p { font-size: 13px; color: var(--text-muted); line-height: 1.4; }
+
+/* Token gauge (sticky) */
+.token-gauge {
+  position: sticky; top: 0; z-index: 10; background: var(--bg);
+  border-bottom: 1px solid var(--border-light); padding: 10px 0;
+  margin-top: 24px;
+}
+.gauge-label { font-size: 13px; color: var(--text-muted); margin-bottom: 6px; }
+.gauge-label strong { color: var(--text); font-family: var(--font-mono); }
+.gauge-bar { height: 8px; background: var(--bg-surface); border-radius: 4px; overflow: hidden; position: relative; }
+.gauge-fill { height: 100%; border-radius: 4px; transition: width 150ms, background 150ms; }
+.gauge-marks { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-top: 4px; font-family: var(--font-mono); }
+
+/* Category rows */
+.category-row {
+  border: 1px solid var(--border-light); border-radius: 6px;
+  margin-bottom: 8px; overflow: hidden;
+}
+.category-header {
+  display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+  cursor: pointer; user-select: none;
+}
+.category-header .cat-name { font-family: var(--font-mono); font-size: 14px; font-weight: 500; flex: 1; }
+.category-header .cat-count { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
+.category-header .cat-desc { font-size: 13px; color: var(--text-muted); flex: 2; }
+.category-header .chevron { color: var(--text-dim); font-size: 12px; transition: transform 150ms; }
+.category-header .chevron.open { transform: rotate(90deg); }
+.category-details {
+  display: none; border-top: 1px solid var(--border-light);
+  padding: 12px 16px; background: var(--bg-surface);
+}
+.category-details.open { display: block; }
+.tool-item { display: flex; gap: 8px; padding: 4px 0; font-size: 13px; }
+.tool-item .tool-name { font-family: var(--font-mono); color: var(--accent); min-width: 200px; flex-shrink: 0; }
+.tool-item .tool-desc { color: var(--text-muted); }
+
+/* Toggle switch */
+.toggle { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+.toggle label {
+  display: block; width: 40px; height: 22px; background: var(--toggle-bg);
+  border-radius: 11px; cursor: pointer; transition: background 150ms;
+  position: relative;
+}
+.toggle label::after {
+  content: ''; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; background: var(--toggle-knob);
+  border-radius: 50%; transition: transform 150ms;
+}
+.toggle input:checked + label { background: var(--toggle-bg-on); }
+.toggle input:checked + label::after { transform: translateX(18px); }
+.toggle input:focus-visible + label { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Safety options */
+.option-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 12px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+.option-row:last-child { border-bottom: none; }
+.option-info { flex: 1; }
+.option-info .option-label { font-size: 14px; font-weight: 500; }
+.option-info .option-desc { font-size: 13px; color: var(--text-muted); margin-top: 2px; }
+
+/* Response budget */
+.collapsed-section .collapse-toggle {
+  font-size: 14px; color: var(--accent); cursor: pointer; background: none;
+  border: none; font-family: var(--font-sans); padding: 0;
+}
+.collapsed-section .collapse-toggle:hover { text-decoration: underline; }
+.budget-content { display: none; margin-top: 12px; }
+.budget-content.open { display: block; }
+.budget-row { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.budget-row label { font-size: 14px; min-width: 160px; }
+.budget-row input[type="number"] {
+  font-family: var(--font-mono); font-size: 14px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 4px; width: 120px;
+  background: var(--bg-input); color: var(--text);
+}
+.budget-row select {
+  font-size: 14px; padding: 6px 10px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-input); color: var(--text);
+}
+.budget-row .budget-desc { font-size: 12px; color: var(--text-muted); }
+
+/* Output */
+.tabs { display: flex; gap: 0; border-bottom: 2px solid var(--border-light); margin-bottom: 0; }
+.tab {
+  padding: 8px 16px; font-size: 14px; background: none; border: none;
+  cursor: pointer; color: var(--text-muted); border-bottom: 2px solid transparent;
+  margin-bottom: -2px; font-family: var(--font-sans);
+}
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.code-block {
+  position: relative; background: var(--bg-code); border: 1px solid var(--border-light);
+  border-radius: 0 0 6px 6px; overflow: hidden;
+}
+.code-block pre {
+  font-family: var(--font-mono); font-size: 13px; padding: 16px;
+  overflow-x: auto; line-height: 1.5; white-space: pre; color: var(--text);
+}
+.copy-btn {
+  position: absolute; top: 8px; right: 8px; font-size: 12px; padding: 4px 10px;
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 4px;
+  cursor: pointer; color: var(--text-muted); font-family: var(--font-sans);
+}
+.copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+.client-select { margin: 12px 0; }
+.client-select select {
+  font-size: 14px; padding: 8px 12px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-input); color: var(--text);
+}
+
+/* TOML syntax */
+.toml-key { color: #0d9488; }
+.toml-str { color: #d97706; }
+.toml-comment { color: var(--text-dim); }
+.toml-section { color: #7c3aed; }
+[data-theme="dark"] .toml-key { color: #2dd4bf; }
+[data-theme="dark"] .toml-str { color: #fbbf24; }
+[data-theme="dark"] .toml-section { color: #a78bfa; }
+
+/* Footer */
+.footer {
+  margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--border-light);
+  font-size: 13px; color: var(--text-muted); display: flex; gap: 16px;
+}
+.footer a { color: var(--accent); text-decoration: none; }
+.footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <h1>SurgicalFS</h1>
+    <div class="subtitle">Configuration generator</div>
+  </div>
+  <div class="header-right">
+    <span class="version-badge">v0.4.1</span>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode" id="themeBtn">&#9790;</button>
+  </div>
+</div>
+
+<!-- Token gauge (sticky) -->
+<div class="token-gauge" id="tokenGauge">
+  <div class="gauge-label" id="gaugeLabel"><strong>0</strong> tools &middot; ~<strong>0</strong>K tokens &middot; <strong>0</strong>% of 200K context</div>
+  <div class="gauge-bar"><div class="gauge-fill" id="gaugeFill" style="width:0%;background:var(--green)"></div></div>
+  <div class="gauge-marks"><span>0</span><span>5K</span><span>10K</span><span>15K</span><span>20K</span></div>
+</div>
+
+<!-- Section 1: Directories -->
+<div class="section">
+  <div class="section-title">Allowed directories</div>
+  <div class="dir-input-row">
+    <input type="text" id="dirInput" placeholder="" aria-label="Directory path">
+    <button onclick="addDir()">Add</button>
+  </div>
+  <div class="dir-error" id="dirError"></div>
+  <div class="dir-chips" id="dirChips"></div>
+  <div class="dir-warning" id="dirWarning">At least one directory is required</div>
+</div>
+
+<!-- Section 2: Profile quick-start -->
+<div class="section">
+  <div class="section-title">Quick start</div>
+  <div class="profiles" id="profiles">
+    <div class="profile-card" data-profile="core" onclick="selectProfile('core')">
+      <h3>Core</h3>
+      <div class="meta">17 tools &middot; ~5K tokens</div>
+      <p>Read, search, edit, and manage files. Everything you need for code work.</p>
+    </div>
+    <div class="profile-card" data-profile="core-formats" onclick="selectProfile('core-formats')">
+      <h3>Core + Formats</h3>
+      <div class="meta">29 tools &middot; ~9K tokens</div>
+      <p>Adds JSON, CSV, Excel, PDF, and Word file support.</p>
+    </div>
+    <div class="profile-card" data-profile="full" onclick="selectProfile('full')">
+      <h3>Full</h3>
+      <div class="meta">47 tools &middot; ~15K tokens</div>
+      <p>Everything, including backwards-compatible tools for the default MCP server.</p>
+    </div>
+  </div>
+</div>
+
+<!-- Section 3: Tool categories -->
+<div class="section">
+  <div class="section-title">Tool categories</div>
+  <div id="categories"></div>
+</div>
+
+<!-- Section 4: Safety & search -->
+<div class="section">
+  <div class="section-title">Safety &amp; search</div>
+  <div class="option-row">
+    <div class="toggle"><input type="checkbox" id="readOnly"><label for="readOnly"></label></div>
+    <div class="option-info">
+      <div class="option-label">Read-only mode</div>
+      <div class="option-desc">Disable all write and edit tools. The server only reads files, never modifies them.</div>
+    </div>
+  </div>
+  <div class="option-row">
+    <div class="toggle"><input type="checkbox" id="gitignore" checked><label for="gitignore"></label></div>
+    <div class="option-info">
+      <div class="option-label">Respect .gitignore</div>
+      <div class="option-desc">Skip .gitignore'd paths in search results and directory listings. Prevents scanning node_modules, build outputs, etc.</div>
+    </div>
+  </div>
+  <div class="option-row">
+    <div class="toggle"><input type="checkbox" id="symlinks"><label for="symlinks"></label></div>
+    <div class="option-info">
+      <div class="option-label">Follow symlinks</div>
+      <div class="option-desc">Follow symbolic links when accessing files. Disabled by default to prevent directory traversal.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Section 5: Response budget -->
+<div class="section collapsed-section">
+  <div class="section-title">
+    Response budget
+    <button class="collapse-toggle" id="budgetToggle" onclick="toggleBudget()">Show advanced</button>
+  </div>
+  <div class="budget-content" id="budgetContent">
+    <div class="budget-row">
+      <label for="maxLines">Max response lines</label>
+      <input type="number" id="maxLines" value="200" min="10" max="10000">
+      <span class="budget-desc">Hard cap on lines per tool response</span>
+    </div>
+    <div class="budget-row">
+      <label for="maxBytes">Max response bytes</label>
+      <input type="number" id="maxBytes" value="32768" min="1024" max="1048576">
+      <span class="budget-desc">32KB default</span>
+    </div>
+    <div class="budget-row">
+      <label for="truncMode">Truncation mode</label>
+      <select id="truncMode">
+        <option value="smart" selected>Smart (break at newline)</option>
+        <option value="hard">Hard (exact byte cut)</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<!-- Section 6: Output -->
+<div class="section">
+  <div class="section-title">Output</div>
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('toml')">surgicalfs.toml</button>
+    <button class="tab" onclick="switchTab('client')">Client config</button>
+  </div>
+  <div class="tab-content active" id="tab-toml">
+    <div class="code-block">
+      <button class="copy-btn" onclick="copyToml()">Copy</button>
+      <pre id="tomlOutput"></pre>
+    </div>
+  </div>
+  <div class="tab-content" id="tab-client">
+    <div class="client-select">
+      <select id="clientSelect" onchange="updateClientConfig()">
+        <option value="claude-desktop">Claude Desktop</option>
+        <option value="claude-code">Claude Code</option>
+        <option value="cursor">Cursor</option>
+        <option value="vscode">VS Code (Cline / Continue)</option>
+        <option value="windsurf">Windsurf</option>
+        <option value="zed">Zed</option>
+        <option value="remote">Remote (HTTP)</option>
+      </select>
+    </div>
+    <div class="code-block">
+      <button class="copy-btn" onclick="copyClient()">Copy</button>
+      <pre id="clientOutput"></pre>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<div class="footer">
+  <span>SurgicalFS v0.4.1</span>
+  <a href="https://github.com/wonker007/surgicalfs-mcpserver" target="_blank">GitHub</a>
+  <span>MIT License</span>
+</div>
+
+</div>
+
+<script>
+// ── Data ──
+const CATEGORIES = [
+  { id: 'inspect', name: 'inspect', count: 4, tokens: 1200, desc: 'Read file metadata and content by line range', tools: [
+    ['file_info', 'File metadata (size, line count, encoding, timestamps) without reading content'],
+    ['file_head', 'First N lines with truncation indicator'],
+    ['file_tail', 'Last N lines with start line number'],
+    ['file_read_lines', 'Specific line range (1-indexed, inclusive)'],
+  ]},
+  { id: 'search', name: 'search', count: 3, tokens: 1050, desc: 'Find patterns across files with tiered verbosity', tools: [
+    ['file_search', 'Multi-file pattern search via ripgrep. Supports full/lines/count verbosity modes'],
+    ['file_grep', 'Single-file grep returning line numbers only by default'],
+    ['file_search_replace_preview', 'Dry-run find-and-replace showing diffs without modifying'],
+  ]},
+  { id: 'mutate', name: 'mutate', count: 5, tokens: 1750, desc: 'Edit files in-place, returns summaries not content', tools: [
+    ['file_replace', 'In-place find-and-replace. Returns change count, never file content'],
+    ['file_insert', 'Insert text at line number or pattern match. Supports content verification'],
+    ['file_append', 'Append text to end of file'],
+    ['file_patch_lines', 'Replace a line range. Supports content verification'],
+    ['file_batch_edit', 'Multiple edits in one atomic call (~90% less context than individual calls)'],
+  ]},
+  { id: 'json', name: 'json', count: 2, tokens: 600, desc: 'JSONPath queries and mutations (RFC 9535)', tools: [
+    ['json_query', 'JSONPath queries returning matched nodes only'],
+    ['json_mutate', 'Modify JSON at JSONPath locations'],
+  ]},
+  { id: 'csv', name: 'csv', count: 4, tokens: 1200, desc: 'Structured CSV operations with SQL-like filtering', tools: [
+    ['csv_info', 'Column names, row count, detected delimiter'],
+    ['csv_read', 'Read specific rows and/or columns'],
+    ['csv_query', 'Filter rows by column value (eq, neq, contains, gt, lt, regex)'],
+    ['csv_write', 'Create new CSV or append rows'],
+  ]},
+  { id: 'document', name: 'document', count: 3, tokens: 750, desc: 'Text extraction from PDF and Word documents', tools: [
+    ['pdf_info', 'Page count and file size without extraction'],
+    ['pdf_extract', 'Extract text by page range'],
+    ['docx_extract', 'Extract text from .docx with pagination'],
+  ]},
+  { id: 'spreadsheet', name: 'spreadsheet', count: 3, tokens: 900, desc: 'Read and search Excel/ODS spreadsheets', tools: [
+    ['xlsx_info', 'Sheet names and dimensions'],
+    ['xlsx_read', 'Read cells by sheet and range (Excel notation)'],
+    ['xlsx_query', 'Search values across sheets'],
+  ]},
+  { id: 'manage', name: 'manage', count: 6, tokens: 2100, desc: 'File creation, deletion, and disk-to-disk operations', tools: [
+    ['file_write', 'Create/overwrite files under 50 lines'],
+    ['file_write_chunked', 'Verified chunked writes for large files'],
+    ['file_write_stream', 'Atomic staging file promotion with SHA-256 verification'],
+    ['file_copy', 'Disk-to-disk copy \u2014 content never enters conversation'],
+    ['file_delete', 'Delete a file'],
+    ['file_move', 'Move or rename a file'],
+  ]},
+  { id: 'directory', name: 'directory', count: 2, tokens: 600, desc: 'List and visualize directory structures', tools: [
+    ['directory_list', 'List contents with metadata, glob filtering, depth, sorting'],
+    ['directory_tree', 'ASCII tree visualization'],
+  ]},
+  { id: 'utility', name: 'utility', count: 1, tokens: 250, desc: 'SHA-256, MD5, BLAKE3 checksums', tools: [
+    ['file_checksum', 'SHA-256, MD5, or BLAKE3 without reading into context'],
+  ]},
+  { id: 'compat', name: 'compat', count: 14, tokens: 4200, desc: 'Drop-in replacements for the default MCP filesystem server', tools: [
+    ['read_file', 'Full file read (compat)'],
+    ['read_text_file', 'Text file with byte offset/head/tail (compat)'],
+    ['read_media_file', 'Base64-encoded binary file read (compat)'],
+    ['read_multiple_files', 'Batch file read (compat)'],
+    ['write_file', 'File create/overwrite (compat)'],
+    ['edit_file', 'oldText/newText pair editing (compat)'],
+    ['create_directory', 'Create directory/nested structure (compat)'],
+    ['list_directory', 'Simple [FILE]/[DIR] listing (compat)'],
+    ['list_directory_with_sizes', 'Listing with file sizes (compat)'],
+    ['directory_tree_compat', 'JSON tree structure (compat)'],
+    ['move_file', 'Move/rename (compat)'],
+    ['search_files', 'Glob filename search (compat)'],
+    ['get_file_info', 'Basic file metadata (compat)'],
+    ['list_allowed_directories', 'Show allowed directories (compat)'],
+  ]},
+];
+
+const PROFILES = {
+  core: ['inspect', 'search', 'mutate', 'manage', 'directory', 'utility'],
+  'core-formats': ['inspect', 'search', 'mutate', 'json', 'csv', 'document', 'spreadsheet', 'manage', 'directory', 'utility'],
+  full: ['inspect', 'search', 'mutate', 'json', 'csv', 'document', 'spreadsheet', 'manage', 'directory', 'utility', 'compat'],
+};
+
+let directories = [];
+
+// ── Platform detection ──
+function isWindows() { return navigator.platform?.startsWith('Win') || navigator.userAgent.includes('Windows'); }
+function isMac() { return navigator.platform?.startsWith('Mac') || navigator.userAgent.includes('Macintosh'); }
+function getPlaceholder() {
+  if (isWindows()) return 'C:\\Users\\you\\projects';
+  if (isMac()) return '/Users/you/projects';
+  return '/home/you/projects';
+}
+function getBinaryPath() {
+  if (isWindows()) return 'C:\\path\\to\\surgicalfs-mcp.exe';
+  return '/path/to/surgicalfs-mcp';
+}
+
+// ── Theme ──
+function toggleTheme() {
+  const html = document.documentElement;
+  const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('sfs-theme', next);
+  document.getElementById('themeBtn').textContent = next === 'dark' ? '\u2600' : '\u263E';
+}
+(function initTheme() {
+  const saved = localStorage.getItem('sfs-theme');
+  const prefer = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  const theme = saved || prefer;
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('themeBtn').textContent = theme === 'dark' ? '\u2600' : '\u263E';
+})();
+
+// ── Directories ──
+document.getElementById('dirInput').placeholder = getPlaceholder();
+document.getElementById('dirInput').addEventListener('keydown', e => { if (e.key === 'Enter') addDir(); });
+
+function addDir() {
+  const input = document.getElementById('dirInput');
+  const errEl = document.getElementById('dirError');
+  let val = input.value.trim();
+  errEl.textContent = '';
+  if (!val) { errEl.textContent = 'Path cannot be empty'; return; }
+  // Check absolute
+  const isDrive = /^[A-Za-z]:[\\\/]/.test(val);
+  const isUnix = val.startsWith('/');
+  if (!isDrive && !isUnix) { errEl.textContent = 'Path must be absolute (e.g. C:\\ or /)'; return; }
+  // Normalize: drive letter paths use backslashes
+  if (isDrive) val = val.replace(/\//g, '\\');
+  // Strip trailing slash/backslash
+  val = val.replace(/[\\\/]+$/, '');
+  if (directories.includes(val)) { errEl.textContent = 'Directory already added'; return; }
+  directories.push(val);
+  input.value = '';
+  renderDirs();
+  updateOutput();
+}
+function removeDir(idx) { directories.splice(idx, 1); renderDirs(); updateOutput(); }
+function renderDirs() {
+  const el = document.getElementById('dirChips');
+  const warn = document.getElementById('dirWarning');
+  el.innerHTML = directories.map((d, i) =>
+    `<span class="dir-chip"><span>${escHtml(d)}</span><button onclick="removeDir(${i})" aria-label="Remove">&times;</button></span>`
+  ).join('');
+  warn.style.display = directories.length === 0 ? 'block' : 'none';
+}
+
+// ── Categories ──
+function buildCategories() {
+  const el = document.getElementById('categories');
+  el.innerHTML = CATEGORIES.map(cat => `
+    <div class="category-row" id="cat-${cat.id}">
+      <div class="category-header" onclick="toggleCatDetails('${cat.id}')">
+        <div class="toggle" onclick="event.stopPropagation()">
+          <input type="checkbox" id="toggle-${cat.id}" checked onchange="onCatToggle()">
+          <label for="toggle-${cat.id}"></label>
+        </div>
+        <span class="cat-name">${cat.name}</span>
+        <span class="cat-count">${cat.count} tools</span>
+        <span class="cat-desc">${cat.desc}</span>
+        <span class="chevron" id="chev-${cat.id}">&#9654;</span>
+      </div>
+      <div class="category-details" id="details-${cat.id}">
+        ${cat.tools.map(([name, desc]) =>
+          `<div class="tool-item"><span class="tool-name">${name}</span><span class="tool-desc">${desc}</span></div>`
+        ).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+function toggleCatDetails(id) {
+  const det = document.getElementById('details-' + id);
+  const chev = document.getElementById('chev-' + id);
+  det.classList.toggle('open');
+  chev.classList.toggle('open');
+}
+function onCatToggle() { detectProfile(); updateGauge(); updateOutput(); }
+function getEnabledCats() { return CATEGORIES.filter(c => document.getElementById('toggle-' + c.id)?.checked).map(c => c.id); }
+
+// ── Profiles ──
+function selectProfile(id) {
+  const cats = PROFILES[id];
+  CATEGORIES.forEach(c => {
+    document.getElementById('toggle-' + c.id).checked = cats.includes(c.id);
+  });
+  detectProfile();
+  updateGauge();
+  updateOutput();
+}
+function detectProfile() {
+  const enabled = getEnabledCats();
+  document.querySelectorAll('.profile-card').forEach(card => {
+    const pid = card.dataset.profile;
+    const expected = PROFILES[pid];
+    const match = expected.length === enabled.length && expected.every(c => enabled.includes(c));
+    card.classList.toggle('active', match);
+  });
+}
+
+// ── Token gauge ──
+function updateGauge() {
+  const enabled = getEnabledCats();
+  let tools = 0, tokens = 0;
+  CATEGORIES.forEach(c => {
+    if (enabled.includes(c.id)) { tools += c.count; tokens += c.tokens; }
+  });
+  const pct = Math.min(tokens / 20000 * 100, 100);
+  const ctxPct = (tokens / 200000 * 100).toFixed(1);
+  const kTokens = (tokens / 1000).toFixed(tokens >= 1000 ? 0 : 1);
+  const fill = document.getElementById('gaugeFill');
+  fill.style.width = pct + '%';
+  fill.style.background = tokens <= 5000 ? 'var(--green)' : tokens <= 10000 ? 'var(--amber)' : 'var(--red)';
+  document.getElementById('gaugeLabel').innerHTML =
+    `<strong>${tools}</strong> tools &middot; ~<strong>${kTokens}K</strong> tokens &middot; <strong>${ctxPct}%</strong> of 200K context`;
+}
+
+// ── Budget ──
+function toggleBudget() {
+  const el = document.getElementById('budgetContent');
+  const btn = document.getElementById('budgetToggle');
+  el.classList.toggle('open');
+  btn.textContent = el.classList.contains('open') ? 'Hide advanced' : 'Show advanced';
+}
+
+// ── Safety toggles ──
+document.getElementById('readOnly').addEventListener('change', updateOutput);
+document.getElementById('gitignore').addEventListener('change', updateOutput);
+document.getElementById('symlinks').addEventListener('change', updateOutput);
+document.getElementById('maxLines').addEventListener('input', updateOutput);
+document.getElementById('maxBytes').addEventListener('input', updateOutput);
+document.getElementById('truncMode').addEventListener('change', updateOutput);
+
+// ── TOML generation ──
+function generateToml() {
+  const lines = [];
+  const c = (t) => `<span class="toml-comment">${escHtml(t)}</span>`;
+  const k = (t) => `<span class="toml-key">${t}</span>`;
+  const s = (t) => `<span class="toml-str">"${escHtml(t)}"</span>`;
+  const sec = (t) => `<span class="toml-section">${escHtml(t)}</span>`;
+
+  // [security]
+  lines.push(sec('[security]'));
+  lines.push(`${k('allowed_directories')} = [${directories.map(d => {
+    const escaped = d.replace(/\\/g, '\\\\');
+    return s(escaped);
+  }).join(', ')}]`);
+  const followSym = document.getElementById('symlinks').checked;
+  if (followSym) lines.push(`${k('follow_symlinks')} = true`);
+  const readOnly = document.getElementById('readOnly').checked;
+  if (readOnly) lines.push(`${k('read_only')} = true`);
+
+  // [search]
+  const gitignore = document.getElementById('gitignore').checked;
+  if (!gitignore) {
+    lines.push('');
+    lines.push(sec('[search]'));
+    lines.push(`${k('respect_gitignore')} = false`);
+  }
+
+  // [tools]
+  const enabled = getEnabledCats();
+  const allCats = CATEGORIES.map(c => c.id);
+  const allEnabled = allCats.every(c => enabled.includes(c));
+  if (!allEnabled) {
+    lines.push('');
+    lines.push(sec('[tools]'));
+    lines.push(`${k('enable')} = [${enabled.map(c => s(c)).join(', ')}]`);
+  }
+
+  // [response_budget]
+  const maxLines = parseInt(document.getElementById('maxLines').value) || 200;
+  const maxBytes = parseInt(document.getElementById('maxBytes').value) || 32768;
+  const truncMode = document.getElementById('truncMode').value;
+  const budgetChanged = maxLines !== 200 || maxBytes !== 32768 || truncMode !== 'smart';
+  if (budgetChanged) {
+    lines.push('');
+    lines.push(sec('[response_budget]'));
+    if (maxLines !== 200) lines.push(`${k('max_response_lines')} = ${maxLines}`);
+    if (maxBytes !== 32768) lines.push(`${k('max_response_bytes')} = ${maxBytes}`);
+    if (truncMode !== 'smart') lines.push(`${k('truncation_mode')} = ${s(truncMode)}`);
+  }
+
+  return lines.join('\n');
+}
+function getPlainToml() {
+  const el = document.createElement('div');
+  el.innerHTML = generateToml();
+  return el.textContent;
+}
+
+// ── Client config ──
+function generateClientConfig(client) {
+  const bin = getBinaryPath();
+  const configPath = isWindows()
+    ? 'C:\\path\\to\\surgicalfs.toml'
+    : '/path/to/surgicalfs.toml';
+
+  switch (client) {
+    case 'claude-desktop': return JSON.stringify({
+      mcpServers: {
+        surgicalfs: {
+          command: bin,
+          args: ['--config', configPath]
+        }
+      }
+    }, null, 2);
+
+    case 'claude-code':
+      return `claude mcp add surgicalfs -- ${bin} --config ${configPath}`;
+
+    case 'cursor': return JSON.stringify({
+      mcpServers: {
+        surgicalfs: {
+          command: bin,
+          args: ['--config', configPath]
+        }
+      }
+    }, null, 2);
+
+    case 'vscode': return JSON.stringify({
+      "mcp": {
+        "servers": {
+          "surgicalfs": {
+            "command": bin,
+            "args": ["--config", configPath]
+          }
+        }
+      }
+    }, null, 2);
+
+    case 'windsurf': return JSON.stringify({
+      mcpServers: {
+        surgicalfs: {
+          command: bin,
+          args: ['--config', configPath]
+        }
+      }
+    }, null, 2);
+
+    case 'zed': return JSON.stringify({
+      context_servers: {
+        surgicalfs: {
+          command: { path: bin, args: ['--config', configPath] }
+        }
+      }
+    }, null, 2);
+
+    case 'remote':
+      return `# Start supergateway (streamable HTTP wrapper)
+npx -y supergateway \\
+  --stdio "${bin} --config ${configPath}" \\
+  --port 8787 \\
+  --outputTransport streamableHttp \\
+  --host 127.0.0.1 \\
+  --cors
+
+# Then connect your MCP client to:
+# http://localhost:8787/mcp`;
+
+    default: return '';
+  }
+}
+
+// ── Output update ──
+function updateOutput() {
+  document.getElementById('tomlOutput').innerHTML = generateToml();
+  updateClientConfig();
+}
+function updateClientConfig() {
+  const client = document.getElementById('clientSelect').value;
+  document.getElementById('clientOutput').textContent = generateClientConfig(client);
+}
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector(`.tab-content#tab-${tab}`).classList.add('active');
+  document.querySelector(`.tab[onclick*="${tab}"]`).classList.add('active');
+}
+
+// ── Clipboard ──
+function copyToml() { copyText(getPlainToml(), event.target); }
+function copyClient() {
+  const text = document.getElementById('clientOutput').textContent;
+  copyText(text, event.target);
+}
+function copyText(text, btn) {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => flashBtn(btn, 'Copied!'));
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    flashBtn(btn, 'Copied!');
+  }
+}
+function flashBtn(btn, msg) {
+  const orig = btn.textContent; btn.textContent = msg;
+  setTimeout(() => btn.textContent = orig, 1500);
+}
+
+// ── Utility ──
+function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ── Init ──
+buildCategories();
+selectProfile('core');
+renderDirs();
+updateGauge();
+updateOutput();
+</script>
+</body>
+</html>
