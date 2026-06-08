@@ -104,9 +104,25 @@ async fn main() -> Result<()> {
     // Create server
     let server = server::SurgicalFsServer::new(cfg, path_guard);
 
-    // Grab the activity tracker before the server is moved into serve(), so the
-    // idle watchdog (below) can observe in-flight requests and last activity.
-    let activity = server.activity_handle();
+    // Start the idle self-reap watchdog as an INDEPENDENT task before serving.
+    //
+    // It must NOT live inside the post-serve select below: serve() does not
+    // return until the client's MCP initialize handshake completes, so a
+    // watchdog placed after it would never run for a child stuck before or
+    // during init (e.g. a connection the gateway dropped mid-handshake) — the
+    // very orphan we must reap under supergateway. As a standalone task it
+    // covers every phase (pre-init, idle-between-calls, post-call); the
+    // in-flight guard in ActivityTracker still prevents reaping mid-response.
+    if idle_timeout_secs > 0 {
+        let activity = server.activity_handle();
+        tokio::spawn(async move {
+            lifecycle::idle_watchdog(activity, idle_timeout_secs).await;
+            tracing::info!(
+                "Idle for {idle_timeout_secs}s with no tool activity; self-reaping orphaned child."
+            );
+            std::process::exit(0);
+        });
+    }
 
     // Serve over stdio
     tracing::info!("Server ready, listening on stdio...");
@@ -126,11 +142,6 @@ async fn main() -> Result<()> {
         }
         _ = lifecycle::stdin_pipe_broken() => {
             tracing::info!("Stdin pipe broken (parent exited), shutting down.");
-        }
-        _ = lifecycle::idle_watchdog(activity, idle_timeout_secs), if idle_timeout_secs > 0 => {
-            tracing::info!(
-                "Idle for {idle_timeout_secs}s with no tool activity; self-reaping orphaned child."
-            );
         }
     }
 
