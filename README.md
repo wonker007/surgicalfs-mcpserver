@@ -2,7 +2,7 @@
 
 High-performance, context-efficient filesystem MCP server built in Rust. Designed as a drop-in replacement for the default `@modelcontextprotocol/server-filesystem` — with surgical read/write operations, structured file format support, and aggressive context window optimization.
 
-**Version: 0.4.1** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
+**Version: 0.4.2** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
 
 Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Zed, ChatGPT (via remote MCP), Gemini, and more.
 
@@ -169,6 +169,14 @@ npx supergateway --stdio "/path/to/surgicalfs-mcp" --port 8080 --outputTransport
 
 Then point your tunnel at `localhost:8080` and register the public URL in your client's MCP integration settings.
 
+> **Windows + stateless gateways — prevent orphaned processes:** In supergateway's default *stateless* `streamableHttp` mode, a fresh server process is spawned per request and is **not** reliably reaped on Windows (the gateway's `child.kill()` targets the `cmd.exe` shell wrapper, and it never closes the child's stdin — so stdin-EOF never arrives while the gateway is alive). These children accumulate until the gateway exhausts its handles and the endpoint goes dark. Pass `--idle-timeout-secs` so each child self-reaps once idle:
+>
+> ```bash
+> npx supergateway --stdio "/path/to/surgicalfs-mcp --idle-timeout-secs 30" --port 8080 --outputTransport streamableHttp
+> ```
+>
+> Use a small value (e.g. `30`) for stateless mode, where each child is single-shot. For `--stateful` supergateway (one reused process per session), use a value **larger** than the longest expected mid-conversation pause (e.g. `600`) so a session isn't reaped during think-time.
+
 > **Note:** AI providers make outbound connections to your MCP endpoint — `localhost` URLs won't work from hosted clients. A tunnel or public-facing server is required.
 
 > **Security:** MCP over HTTP has no built-in authentication. Anyone who discovers your tunnel URL can call any tool and read/write files within your allowed directories. Secure your tunnel with IP allowlisting (e.g., Cloudflare WAF rules restricting to your AI provider's IP ranges), VPN, or equivalent access controls before exposing to the internet. The `--read-only` flag provides an additional safety layer for remote deployments.
@@ -212,6 +220,13 @@ encoding = "auto"              # "auto", "utf-8", "windows-1252"
 max_response_lines = 200       # hard cap on response line count
 max_response_bytes = 32768     # hard cap on response byte size (32KB)
 truncation_mode = "smart"      # "smart" (break at newline) or "hard" (exact byte cut)
+
+[runtime]
+idle_timeout_secs = 0          # self-exit after N idle seconds (0 = never).
+                               # Leave 0 for local stdio clients. Set >0 only for
+                               # remote supergateway deployments to reap orphaned
+                               # children (see Remote access above). CLI override:
+                               # surgicalfs-mcp --idle-timeout-secs 30
 ```
 
 ---
@@ -443,7 +458,7 @@ This ensures that even if a tool produces a large result, the context window imp
 ```bash
 cargo build              # Debug build
 cargo build --release    # Optimized, stripped, LTO-enabled release build
-cargo test               # Run all tests (~112 tests)
+cargo test               # Run all tests (~145 tests)
 cargo clippy             # Lint (zero warnings policy)
 cargo fmt                # Format
 cargo audit              # Dependency vulnerability scan (zero advisories)
@@ -486,6 +501,7 @@ codegen-units = 1
 
 | Version | Changes |
 |---------|---------|
+| **v0.4.2** | Idle self-reap to prevent orphaned processes behind stateless `supergateway` on Windows. New `[runtime] idle_timeout_secs` config + `--idle-timeout-secs` CLI flag (default 0 = off; local clients unaffected). Lifecycle logic consolidated into `src/lifecycle.rs` with an in-flight guard so a process is never reaped mid-response. |
 | **v0.4.1** | Security audit fixes: integer overflow in `file_grep` pagination (switched to `saturating_add`). Config validation for empty/invalid tool category names. Updated tool descriptions for `expected_content`. Edge case tests for CRLF content verification and overflow saturation. |
 | **v0.4.0** | Config-driven tool categories (`[tools] enable`). `.gitignore` support via `ignore` crate. `--read-only` CLI flag. Search pagination (`offset` param). Content verification (`expected_content` on `file_patch_lines` and `file_insert`). |
 | **v0.3.4** | Fixed `file_replace` silently failing on multi-line find patterns (now uses whole-text matching with `\r\n` normalization). Fixed `file_insert` anchor parsing from web-based MCP clients (auto-parses JSON string anchors). Added `file_grep` single-file search tool. Added `return_mode` (`full`/`lines`/`count`) to `file_search`. Added `max_results` to `search_files`. |

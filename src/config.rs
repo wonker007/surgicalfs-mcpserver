@@ -13,6 +13,8 @@ pub struct Config {
     pub response_budget: ResponseBudgetConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub runtime: RuntimeConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -64,6 +66,20 @@ pub struct ResponseBudgetConfig {
 pub struct ToolsConfig {
     /// Which tool categories to enable. None = all enabled.
     pub enable: Option<Vec<String>>,
+}
+
+/// Process runtime / lifecycle settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RuntimeConfig {
+    /// Seconds of no tool activity after which the server self-exits (0 = never).
+    ///
+    /// Intended for the remote `supergateway` deployment, whose stateless mode
+    /// spawns a child per request and cannot reap it (see `src/lifecycle.rs`).
+    /// A non-zero value lets each orphaned child reap itself once idle, bounding
+    /// the live process count. Leave 0 for local stdio clients (Claude Desktop,
+    /// IDEs), where an idle pause is normal and stdin-EOF is the real shutdown.
+    #[serde(default)]
+    pub idle_timeout_secs: u64,
 }
 
 /// All valid tool category names.
@@ -282,6 +298,7 @@ impl Config {
             defaults: DefaultsConfig::default(),
             response_budget: ResponseBudgetConfig::default(),
             tools: ToolsConfig::default(),
+            runtime: RuntimeConfig::default(),
         })
     }
 
@@ -345,5 +362,19 @@ head_lines = 100
         assert_eq!(config.search.max_results, 50);
         assert_eq!(config.defaults.head_lines, 100);
         assert_eq!(config.defaults.tail_lines, 50); // default
+        assert_eq!(config.runtime.idle_timeout_secs, 0); // default: idle-reap off
+    }
+
+    #[test]
+    fn test_runtime_idle_timeout_parses() {
+        let toml_str = r#"
+[security]
+allowed_directories = ["C:\\Test"]
+
+[runtime]
+idle_timeout_secs = 30
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.runtime.idle_timeout_secs, 30);
     }
 }

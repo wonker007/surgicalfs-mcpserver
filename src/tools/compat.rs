@@ -647,6 +647,7 @@ mod tests {
             defaults: Default::default(),
             response_budget: Default::default(),
             tools: Default::default(),
+            runtime: Default::default(),
         }
     }
 
