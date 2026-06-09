@@ -159,8 +159,7 @@ pub fn file_replace(
         new_content
     };
 
-    fs::write(&canonical, &final_content)
-        .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(&canonical, final_content.as_bytes())?;
 
     Ok(json!({
         "replacements_made": replacements_made,
@@ -284,8 +283,7 @@ fn file_replace_multiline(
         new_text
     };
 
-    fs::write(canonical, &final_content)
-        .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(canonical, final_content.as_bytes())?;
 
     modified_line_nums.sort();
     Ok(json!({
@@ -442,8 +440,7 @@ pub fn file_insert(
         new_content
     };
 
-    fs::write(&canonical, &final_content)
-        .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(&canonical, final_content.as_bytes())?;
 
     Ok(json!({
         "inserted_at_lines": inserted_at,
@@ -470,6 +467,7 @@ pub fn file_append(
     };
 
     use std::io::Write;
+    // Non-atomic: append cannot use temp+rename without losing existing content.
     let mut file = fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -568,8 +566,7 @@ pub fn file_patch_lines(
         new_content
     };
 
-    fs::write(&canonical, &final_content)
-        .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(&canonical, final_content.as_bytes())?;
 
     Ok(json!({
         "old_line_count": old_count,
@@ -837,8 +834,7 @@ pub fn file_batch_edit(
         } else {
             new_content
         };
-        fs::write(&canonical, &final_content)
-            .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+        super::atomic_write(&canonical, final_content.as_bytes())?;
     }
 
     // Sort results back by original index
@@ -1238,6 +1234,40 @@ mod tests {
         assert_eq!(result["lines_added"], 1);
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.ends_with("APPENDED"));
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_atomic_write_creates_file_no_temp() {
+        let path = std::env::temp_dir().join("surgicalfs_atomic_create.txt");
+        let tmp = std::env::temp_dir().join("surgicalfs_atomic_create.txt.surgicalfs-tmp");
+        fs::remove_file(&path).ok();
+        fs::remove_file(&tmp).ok();
+
+        crate::tools::atomic_write(&path, b"hello world").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello world");
+        assert!(
+            !tmp.exists(),
+            "temp file must not remain after a successful write"
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_atomic_write_overwrites_existing_no_temp() {
+        let path = std::env::temp_dir().join("surgicalfs_atomic_overwrite.txt");
+        let tmp = std::env::temp_dir().join("surgicalfs_atomic_overwrite.txt.surgicalfs-tmp");
+        fs::remove_file(&tmp).ok();
+        fs::write(&path, "old content").unwrap();
+
+        crate::tools::atomic_write(&path, b"new content").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new content");
+        assert!(
+            !tmp.exists(),
+            "temp file must not remain after an overwrite"
+        );
 
         fs::remove_file(&path).ok();
     }

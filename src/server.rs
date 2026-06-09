@@ -613,19 +613,22 @@ impl SurgicalFsServer {
         description = "Search for text patterns across files using ripgrep. Returns matching lines with context. Use return_mode=\"lines\" for just line numbers (lowest token cost) or return_mode=\"count\" for match counts only. Default return_mode=\"full\" includes matching lines with context."
     )]
     fn file_search(&self, Parameters(p): Parameters<FileSearchParams>) -> String {
+        let opts = crate::tools::search::FileSearchOptions {
+            is_regex: p.is_regex,
+            case_sensitive: p.case_sensitive,
+            file_globs: p.file_globs,
+            context_lines: p.context_lines,
+            max_results: p.max_results,
+            return_mode: p.return_mode,
+            offset: p.offset,
+        };
         self.budget(crate::tools::search::file_search(
             &self.path_guard,
             &self.config,
             &self.search_backend,
             &p.pattern,
             &p.path,
-            p.is_regex,
-            p.case_sensitive,
-            p.file_globs,
-            p.context_lines,
-            p.max_results,
-            p.return_mode,
-            p.offset,
+            opts,
         ))
     }
 
@@ -633,16 +636,19 @@ impl SurgicalFsServer {
         description = "Lightweight single-file grep. Returns just line numbers by default — the most token-efficient way to locate patterns within a known file. Use include_content=true to also get matching line text. For searching across multiple files or directories, use file_search instead."
     )]
     fn file_grep(&self, Parameters(p): Parameters<FileGrepParams>) -> String {
+        let opts = crate::tools::search::FileGrepOptions {
+            is_regex: p.is_regex,
+            case_sensitive: p.case_sensitive,
+            max_results: p.max_results,
+            include_content: p.include_content,
+            offset: p.offset,
+        };
         self.budget(crate::tools::search::file_grep(
             &self.path_guard,
             &self.config,
             &p.path,
             &p.pattern,
-            p.is_regex,
-            p.case_sensitive,
-            p.max_results,
-            p.include_content,
-            p.offset,
+            opts,
         ))
     }
 
@@ -833,15 +839,18 @@ impl SurgicalFsServer {
         description = "List directory contents with metadata. Supports glob filtering, depth control, sorting, and .gitignore filtering."
     )]
     fn directory_list(&self, Parameters(p): Parameters<DirectoryListParams>) -> String {
+        let opts = crate::tools::directory::DirectoryListOptions {
+            depth: p.depth,
+            globs: p.globs,
+            show_hidden: p.show_hidden,
+            sort_by: p.sort_by,
+            respect_gitignore: self.config.search.respect_gitignore,
+            show_ignored: p.show_ignored,
+        };
         self.budget(crate::tools::directory::directory_list(
             &self.path_guard,
             &p.path,
-            p.depth,
-            p.globs,
-            p.show_hidden,
-            p.sort_by,
-            self.config.search.respect_gitignore,
-            p.show_ignored,
+            opts,
         ))
     }
 
@@ -849,15 +858,18 @@ impl SurgicalFsServer {
         description = "Generate an ASCII tree representation of a directory structure. Respects .gitignore by default."
     )]
     fn directory_tree(&self, Parameters(p): Parameters<DirectoryTreeParams>) -> String {
+        let opts = crate::tools::directory::DirectoryTreeOptions {
+            depth: p.depth,
+            globs: p.globs,
+            show_hidden: p.show_hidden,
+            show_size: p.show_size,
+            respect_gitignore: self.config.search.respect_gitignore,
+            show_ignored: p.show_ignored,
+        };
         self.budget(crate::tools::directory::directory_tree(
             &self.path_guard,
             &p.path,
-            p.depth,
-            p.globs,
-            p.show_hidden,
-            p.show_size,
-            self.config.search.respect_gitignore,
-            p.show_ignored,
+            opts,
         ))
     }
 
@@ -905,15 +917,18 @@ impl SurgicalFsServer {
         description = "Filter CSV rows by column value. Operators: eq, neq, contains, gt, lt, gte, lte, regex. Avoids loading unneeded rows into context."
     )]
     fn csv_query(&self, Parameters(p): Parameters<CsvQueryParams>) -> String {
+        let opts = crate::tools::csv_ops::CsvQueryOptions {
+            columns: p.columns,
+            max_rows: p.max_rows,
+            delimiter: p.delimiter,
+        };
         self.budget(crate::tools::csv_ops::csv_query(
             &self.path_guard,
             &p.path,
             &p.column,
             &p.operator,
             &p.value,
-            p.columns,
-            p.max_rows,
-            p.delimiter,
+            opts,
         ))
     }
 

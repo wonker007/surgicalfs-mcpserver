@@ -150,16 +150,27 @@ pub fn csv_read(
 }
 
 /// Filter CSV rows by column value.
+/// Optional knobs for [`csv_query`].
+#[derive(Default)]
+pub struct CsvQueryOptions {
+    pub columns: Option<Vec<String>>,
+    pub max_rows: Option<u32>,
+    pub delimiter: Option<String>,
+}
+
 pub fn csv_query(
     path_guard: &PathGuard,
     path: &str,
     column: &str,
     operator: &str,
     value: &str,
-    columns: Option<Vec<String>>,
-    max_rows: Option<u32>,
-    delimiter: Option<String>,
+    opts: CsvQueryOptions,
 ) -> SurgicalResult<serde_json::Value> {
+    let CsvQueryOptions {
+        columns,
+        max_rows,
+        delimiter,
+    } = opts;
     let canonical = path_guard.validate(path)?;
     path_guard.check_size(&canonical)?;
 
@@ -294,6 +305,7 @@ pub fn csv_write(
 
     if append && file_existed {
         // Append mode: open for append
+        // Non-atomic: append cannot use temp+rename without losing existing content.
         let file = fs::OpenOptions::new()
             .append(true)
             .open(&canonical)
@@ -315,9 +327,17 @@ pub fn csv_write(
         wtr.flush()
             .map_err(|e| SurgicalError::io_error(&e, "Flush failed"))?;
     } else {
-        // Create new file
-        let file = fs::File::create(&canonical)
-            .map_err(|e| SurgicalError::io_error(&e, "Create file failed"))?;
+        // Create new file atomically: write CSV to a sibling temp file, then
+        // rename it over the destination so a hard kill / power loss can never
+        // leave a torn or partial file. (A rare mid-write error leaves the temp
+        // file but never touches the destination.)
+        let tmp_path = {
+            let mut t = canonical.as_os_str().to_owned();
+            t.push(".surgicalfs-tmp");
+            std::path::PathBuf::from(t)
+        };
+        let file = fs::File::create(&tmp_path)
+            .map_err(|e| SurgicalError::io_error(&e, "Create temp file failed"))?;
 
         let mut wtr = csv::WriterBuilder::new()
             .delimiter(delim_char as u8)
@@ -344,6 +364,11 @@ pub fn csv_write(
         }
         wtr.flush()
             .map_err(|e| SurgicalError::io_error(&e, "Flush failed"))?;
+        drop(wtr); // close the temp file before renaming (Windows sharing)
+        fs::rename(&tmp_path, &canonical).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            SurgicalError::io_error(&e, "Atomic rename failed")
+        })?;
     }
 
     // Count total rows in file now
@@ -463,9 +488,7 @@ mod tests {
             "age",
             "gt",
             "28",
-            None,
-            None,
-            None,
+            CsvQueryOptions::default(),
         )
         .unwrap();
         assert_eq!(result["matched_rows"], 2); // Alice (30), Charlie (35)

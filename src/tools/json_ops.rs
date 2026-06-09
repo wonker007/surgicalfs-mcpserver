@@ -142,8 +142,7 @@ pub fn json_mutate(
         )
     })?;
 
-    fs::write(&canonical, output.as_bytes())
-        .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(&canonical, output.as_bytes())?;
 
     Ok(json!({
         "operations_applied": ops_applied,

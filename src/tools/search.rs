@@ -7,6 +7,18 @@ use regex::Regex;
 use serde_json::json;
 use std::fs;
 
+/// Optional knobs for [`file_search`].
+#[derive(Default)]
+pub struct FileSearchOptions {
+    pub is_regex: Option<bool>,
+    pub case_sensitive: Option<bool>,
+    pub file_globs: Option<Vec<String>>,
+    pub context_lines: Option<u32>,
+    pub max_results: Option<u32>,
+    pub return_mode: Option<String>,
+    pub offset: Option<u32>,
+}
+
 /// Search for text patterns across files using ripgrep or native fallback.
 ///
 /// return_mode controls output verbosity:
@@ -19,14 +31,17 @@ pub fn file_search(
     search_backend: &SearchBackend,
     pattern: &str,
     path: &str,
-    is_regex: Option<bool>,
-    case_sensitive: Option<bool>,
-    file_globs: Option<Vec<String>>,
-    context_lines: Option<u32>,
-    max_results: Option<u32>,
-    return_mode: Option<String>,
-    offset: Option<u32>,
+    opts: FileSearchOptions,
 ) -> SurgicalResult<serde_json::Value> {
+    let FileSearchOptions {
+        is_regex,
+        case_sensitive,
+        file_globs,
+        context_lines,
+        max_results,
+        return_mode,
+        offset,
+    } = opts;
     let canonical = path_guard.validate(path)?;
 
     let is_regex = is_regex.unwrap_or(true);
@@ -50,17 +65,18 @@ pub fn file_search(
     // Request offset + max_results from backend so we can skip then paginate
     let backend_limit = max_results.saturating_add(offset as u32);
 
+    let canonical_str = canonical.to_string_lossy();
     let result = search_backend
-        .search(
+        .search(&crate::search_backend::SearchQuery {
             pattern,
-            &canonical.to_string_lossy(),
+            path: &canonical_str,
             is_regex,
             case_sensitive,
-            &file_globs,
+            file_globs: &file_globs,
             context_lines,
-            backend_limit,
-            config.search.respect_gitignore,
-        )
+            max_results: backend_limit,
+            respect_gitignore: config.search.respect_gitignore,
+        })
         .map_err(|e| {
             SurgicalError::new(
                 ErrorCode::InternalError,
@@ -121,6 +137,16 @@ pub fn file_search(
     }
 }
 
+/// Optional knobs for [`file_grep`].
+#[derive(Default)]
+pub struct FileGrepOptions {
+    pub is_regex: Option<bool>,
+    pub case_sensitive: Option<bool>,
+    pub max_results: Option<u32>,
+    pub include_content: Option<bool>,
+    pub offset: Option<u32>,
+}
+
 /// Lightweight single-file grep. Returns only line numbers (and optionally
 /// matching line text). Reads the file directly — no ripgrep subprocess overhead.
 /// Ideal for "where does X appear in this file?" queries at minimal token cost.
@@ -129,12 +155,15 @@ pub fn file_grep(
     config: &Config,
     path: &str,
     pattern: &str,
-    is_regex: Option<bool>,
-    case_sensitive: Option<bool>,
-    max_results: Option<u32>,
-    include_content: Option<bool>,
-    offset: Option<u32>,
+    opts: FileGrepOptions,
 ) -> SurgicalResult<serde_json::Value> {
+    let FileGrepOptions {
+        is_regex,
+        case_sensitive,
+        max_results,
+        include_content,
+        offset,
+    } = opts;
     let canonical = path_guard.validate(path)?;
     path_guard.check_size(&canonical)?;
 
@@ -370,11 +399,7 @@ mod tests {
             &config,
             &path.to_string_lossy(),
             "alpha",
-            None,
-            None,
-            None,
-            None,
-            None,
+            FileGrepOptions::default(),
         )
         .unwrap();
 
@@ -398,11 +423,10 @@ mod tests {
             &config,
             &path.to_string_lossy(),
             "fn ",
-            None,
-            None,
-            None,
-            Some(true),
-            None,
+            FileGrepOptions {
+                include_content: Some(true),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -427,11 +451,10 @@ mod tests {
             &config,
             &path.to_string_lossy(),
             "hello",
-            None,
-            Some(false),
-            None,
-            None,
-            None,
+            FileGrepOptions {
+                case_sensitive: Some(false),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -452,11 +475,10 @@ mod tests {
             &config,
             &path.to_string_lossy(),
             r"^error:",
-            Some(true),
-            None,
-            None,
-            None,
-            None,
+            FileGrepOptions {
+                is_regex: Some(true),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -483,11 +505,10 @@ mod tests {
             &config,
             &path.to_string_lossy(),
             "match",
-            None,
-            None,
-            Some(3),
-            None,
-            None,
+            FileGrepOptions {
+                max_results: Some(3),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -510,11 +531,7 @@ mod tests {
             &config,
             &dir.to_string_lossy(),
             "pattern",
-            None,
-            None,
-            None,
-            None,
-            None,
+            FileGrepOptions::default(),
         );
 
         assert!(result.is_err());

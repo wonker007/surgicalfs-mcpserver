@@ -204,7 +204,7 @@ mod tests {
     fn test_valid_path() {
         let temp = std::env::temp_dir();
         let temp_str = temp.to_string_lossy().to_string();
-        let guard = PathGuard::new(&[temp_str.clone()], false, 5_000_000).unwrap();
+        let guard = PathGuard::new(std::slice::from_ref(&temp_str), false, 5_000_000).unwrap();
 
         // Create a temp file
         let test_file = temp.join("surgicalfs_test_pathguard.txt");
