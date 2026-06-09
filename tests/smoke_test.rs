@@ -637,7 +637,7 @@ fn smoke_csv_query() {
     let path_str = path.to_string_lossy().to_string();
 
     let result =
-        csv_ops::csv_query(&guard, &path_str, "city", "eq", "NYC", None, None, None).unwrap();
+        csv_ops::csv_query(&guard, &path_str, "city", "eq", "NYC", Default::default()).unwrap();
 
     assert!(
         result["matched_rows"].as_u64().unwrap() > 0,
@@ -705,9 +705,15 @@ fn smoke_directory_list() {
     let guard = make_guard(&allowed);
     let path_str = allowed.to_string_lossy().to_string();
 
-    let result =
-        directory::directory_list(&guard, &path_str, Some(1), None, None, None, false, None)
-            .unwrap();
+    let result = directory::directory_list(
+        &guard,
+        &path_str,
+        directory::DirectoryListOptions {
+            depth: Some(1),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     assert!(
         result["total_entries"].as_u64().unwrap() >= 5,
@@ -723,9 +729,15 @@ fn smoke_directory_tree() {
     let guard = make_guard(&allowed);
     let path_str = allowed.to_string_lossy().to_string();
 
-    let result =
-        directory::directory_tree(&guard, &path_str, Some(2), None, None, None, false, None)
-            .unwrap();
+    let result = directory::directory_tree(
+        &guard,
+        &path_str,
+        directory::DirectoryTreeOptions {
+            depth: Some(2),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let tree = result["tree"].as_str().unwrap();
     assert!(
@@ -946,12 +958,11 @@ fn v040_gitignore_directory_list() {
     let result = directory::directory_list(
         &guard,
         &dir.to_string_lossy(),
-        Some(1),
-        None,
-        None,
-        None,
-        true,
-        None,
+        directory::DirectoryListOptions {
+            depth: Some(1),
+            respect_gitignore: true,
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -993,12 +1004,13 @@ fn v040_gitignore_show_ignored_override() {
     let result = directory::directory_list(
         &guard,
         &dir.to_string_lossy(),
-        Some(1),
-        None,
-        Some(true),
-        None,
-        true,
-        Some(true),
+        directory::DirectoryListOptions {
+            depth: Some(1),
+            show_hidden: Some(true),
+            respect_gitignore: true,
+            show_ignored: Some(true),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -1035,7 +1047,7 @@ fn v040_search_pagination() {
     fs::write(&path, &content).unwrap();
     let path_str = path.to_string_lossy().to_string();
 
-    use surgicalfs_mcp::tools::search::file_grep;
+    use surgicalfs_mcp::tools::search::{file_grep, FileGrepOptions};
 
     // Page 1: offset=0, max_results=5 — file_grep uses native backend (scans all matches)
     let r1 = file_grep(
@@ -1043,11 +1055,12 @@ fn v040_search_pagination() {
         &config,
         &path_str,
         "match",
-        Some(false),
-        None,
-        Some(5),
-        None,
-        Some(0),
+        FileGrepOptions {
+            is_regex: Some(false),
+            max_results: Some(5),
+            offset: Some(0),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(r1["total_matches"], 20);
@@ -1059,11 +1072,12 @@ fn v040_search_pagination() {
         &config,
         &path_str,
         "match",
-        Some(false),
-        None,
-        Some(5),
-        None,
-        Some(10),
+        FileGrepOptions {
+            is_regex: Some(false),
+            max_results: Some(5),
+            offset: Some(10),
+            ..Default::default()
+        },
     )
     .unwrap();
     let lines2 = r2["line_numbers"].as_array().unwrap();
@@ -1076,11 +1090,12 @@ fn v040_search_pagination() {
         &config,
         &path_str,
         "match",
-        Some(false),
-        None,
-        Some(5),
-        None,
-        Some(25),
+        FileGrepOptions {
+            is_regex: Some(false),
+            max_results: Some(5),
+            offset: Some(25),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert_eq!(r3["line_numbers"].as_array().unwrap().len(), 0);
@@ -1226,7 +1241,7 @@ fn v040_pagination_overflow_saturating() {
     fs::write(&path, "line1\nline2\nline3").unwrap();
     let path_str = path.to_string_lossy().to_string();
 
-    use surgicalfs_mcp::tools::search::file_grep;
+    use surgicalfs_mcp::tools::search::{file_grep, FileGrepOptions};
 
     // offset=u32::MAX, max_results=10 — should not panic from overflow
     let r = file_grep(
@@ -1234,11 +1249,12 @@ fn v040_pagination_overflow_saturating() {
         &config,
         &path_str,
         "line",
-        Some(false),
-        None,
-        Some(10),
-        None,
-        Some(u32::MAX),
+        FileGrepOptions {
+            is_regex: Some(false),
+            max_results: Some(10),
+            offset: Some(u32::MAX),
+            ..Default::default()
+        },
     )
     .unwrap();
 

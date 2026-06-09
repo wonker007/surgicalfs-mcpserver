@@ -4,17 +4,31 @@ use serde_json::json;
 use std::fs;
 use walkdir::WalkDir;
 
+/// Optional knobs for [`directory_list`].
+#[derive(Default)]
+pub struct DirectoryListOptions {
+    pub depth: Option<u32>,
+    pub globs: Option<Vec<String>>,
+    pub show_hidden: Option<bool>,
+    pub sort_by: Option<String>,
+    pub respect_gitignore: bool,
+    pub show_ignored: Option<bool>,
+}
+
 /// List directory contents with metadata.
 pub fn directory_list(
     path_guard: &PathGuard,
     path: &str,
-    depth: Option<u32>,
-    globs: Option<Vec<String>>,
-    show_hidden: Option<bool>,
-    sort_by: Option<String>,
-    respect_gitignore: bool,
-    show_ignored: Option<bool>,
+    opts: DirectoryListOptions,
 ) -> SurgicalResult<serde_json::Value> {
+    let DirectoryListOptions {
+        depth,
+        globs,
+        show_hidden,
+        sort_by,
+        respect_gitignore,
+        show_ignored,
+    } = opts;
     let canonical = path_guard.validate(path)?;
     if !canonical.is_dir() {
         return Err(SurgicalError::new(
@@ -140,17 +154,31 @@ pub fn directory_list(
     }))
 }
 
+/// Optional knobs for [`directory_tree`].
+#[derive(Default)]
+pub struct DirectoryTreeOptions {
+    pub depth: Option<u32>,
+    pub globs: Option<Vec<String>>,
+    pub show_hidden: Option<bool>,
+    pub show_size: Option<bool>,
+    pub respect_gitignore: bool,
+    pub show_ignored: Option<bool>,
+}
+
 /// Generate ASCII tree representation of a directory.
 pub fn directory_tree(
     path_guard: &PathGuard,
     path: &str,
-    depth: Option<u32>,
-    globs: Option<Vec<String>>,
-    show_hidden: Option<bool>,
-    show_size: Option<bool>,
-    respect_gitignore: bool,
-    show_ignored: Option<bool>,
+    opts: DirectoryTreeOptions,
 ) -> SurgicalResult<serde_json::Value> {
+    let DirectoryTreeOptions {
+        depth,
+        globs,
+        show_hidden,
+        show_size,
+        respect_gitignore,
+        show_ignored,
+    } = opts;
     let canonical = path_guard.validate(path)?;
     if !canonical.is_dir() {
         return Err(SurgicalError::new(
@@ -190,18 +218,21 @@ pub fn directory_tree(
     let mut total_files = 0u32;
     let mut total_dirs = 0u32;
 
+    let ctx = TreeCtx {
+        max_depth: depth,
+        show_hidden,
+        show_size,
+        glob_patterns: &glob_patterns,
+        gitignore: gitignore.as_ref(),
+    };
     build_tree(
         &canonical,
         &mut tree,
         "",
-        depth,
-        show_hidden,
-        show_size,
-        &glob_patterns,
+        0,
+        &ctx,
         &mut total_files,
         &mut total_dirs,
-        0,
-        gitignore.as_ref(),
     );
 
     Ok(json!({
@@ -211,19 +242,32 @@ pub fn directory_tree(
     }))
 }
 
+/// Immutable configuration threaded through the recursive [`build_tree`].
+#[derive(Clone, Copy)]
+struct TreeCtx<'a> {
+    max_depth: usize,
+    show_hidden: bool,
+    show_size: bool,
+    glob_patterns: &'a [glob::Pattern],
+    gitignore: Option<&'a ignore::gitignore::Gitignore>,
+}
+
 fn build_tree(
     dir: &std::path::Path,
     tree: &mut String,
     prefix: &str,
-    max_depth: usize,
-    show_hidden: bool,
-    show_size: bool,
-    glob_patterns: &[glob::Pattern],
+    current_depth: usize,
+    ctx: &TreeCtx,
     total_files: &mut u32,
     total_dirs: &mut u32,
-    current_depth: usize,
-    gitignore: Option<&ignore::gitignore::Gitignore>,
 ) {
+    let TreeCtx {
+        max_depth,
+        show_hidden,
+        show_size,
+        glob_patterns,
+        gitignore,
+    } = *ctx;
     if current_depth >= max_depth {
         return;
     }
@@ -286,14 +330,10 @@ fn build_tree(
                 &entry.path(),
                 tree,
                 &new_prefix,
-                max_depth,
-                show_hidden,
-                show_size,
-                glob_patterns,
+                current_depth + 1,
+                ctx,
                 total_files,
                 total_dirs,
-                current_depth + 1,
-                gitignore,
             );
         } else {
             *total_files += 1;
@@ -337,12 +377,10 @@ mod tests {
         let result = directory_list(
             &guard,
             &dir.to_string_lossy(),
-            Some(1),
-            None,
-            None,
-            None,
-            false,
-            None,
+            DirectoryListOptions {
+                depth: Some(1),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert!(result["total_entries"].as_u64().unwrap() >= 2);
@@ -361,12 +399,10 @@ mod tests {
         let result = directory_tree(
             &guard,
             &dir.to_string_lossy(),
-            Some(2),
-            None,
-            None,
-            None,
-            false,
-            None,
+            DirectoryTreeOptions {
+                depth: Some(2),
+                ..Default::default()
+            },
         )
         .unwrap();
         let tree = result["tree"].as_str().unwrap();

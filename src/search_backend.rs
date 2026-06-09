@@ -76,74 +76,33 @@ impl SearchBackend {
     }
 
     /// Execute a search and return structured results.
-    pub fn search(
-        &self,
-        pattern: &str,
-        path: &str,
-        is_regex: bool,
-        case_sensitive: bool,
-        file_globs: &[String],
-        context_lines: u32,
-        max_results: u32,
-        respect_gitignore: bool,
-    ) -> Result<SearchResult, String> {
+    pub fn search(&self, q: &SearchQuery) -> Result<SearchResult, String> {
         match self {
-            SearchBackend::Ripgrep(rg) => {
-                match self.search_ripgrep(
-                    rg,
-                    pattern,
-                    path,
-                    is_regex,
-                    case_sensitive,
-                    file_globs,
-                    context_lines,
-                    max_results,
-                    respect_gitignore,
-                ) {
-                    Ok(result) => Ok(result),
-                    Err(e) => {
-                        tracing::warn!(
-                            "Ripgrep search failed: {}. Falling back to native search.",
-                            e
-                        );
-                        search_native(
-                            pattern,
-                            path,
-                            is_regex,
-                            case_sensitive,
-                            file_globs,
-                            context_lines,
-                            max_results,
-                            respect_gitignore,
-                        )
-                    }
+            SearchBackend::Ripgrep(rg) => match self.search_ripgrep(rg, q) {
+                Ok(result) => Ok(result),
+                Err(e) => {
+                    tracing::warn!(
+                        "Ripgrep search failed: {}. Falling back to native search.",
+                        e
+                    );
+                    search_native(q)
                 }
-            }
-            SearchBackend::Native => search_native(
-                pattern,
-                path,
-                is_regex,
-                case_sensitive,
-                file_globs,
-                context_lines,
-                max_results,
-                respect_gitignore,
-            ),
+            },
+            SearchBackend::Native => search_native(q),
         }
     }
 
-    fn search_ripgrep(
-        &self,
-        rg_path: &str,
-        pattern: &str,
-        path: &str,
-        is_regex: bool,
-        case_sensitive: bool,
-        file_globs: &[String],
-        context_lines: u32,
-        max_results: u32,
-        respect_gitignore: bool,
-    ) -> Result<SearchResult, String> {
+    fn search_ripgrep(&self, rg_path: &str, q: &SearchQuery) -> Result<SearchResult, String> {
+        let SearchQuery {
+            pattern,
+            path,
+            is_regex,
+            case_sensitive,
+            file_globs,
+            context_lines,
+            max_results,
+            respect_gitignore,
+        } = *q;
         let mut cmd = Command::new(rg_path);
         cmd.arg("--json");
         cmd.arg("--max-count").arg(max_results.to_string());
@@ -195,19 +154,33 @@ impl SearchBackend {
 
 // ─── Native Rust search backend ──────────────────────────────────────────────
 
+/// Bundled search parameters shared by the search backends.
+#[derive(Clone, Copy)]
+pub struct SearchQuery<'a> {
+    pub pattern: &'a str,
+    pub path: &'a str,
+    pub is_regex: bool,
+    pub case_sensitive: bool,
+    pub file_globs: &'a [String],
+    pub context_lines: u32,
+    pub max_results: u32,
+    pub respect_gitignore: bool,
+}
+
 /// Pure Rust search implementation — no external dependencies required.
 /// Used as the primary backend when ripgrep is not available, or as a
 /// fallback when ripgrep fails.
-fn search_native(
-    pattern: &str,
-    path: &str,
-    is_regex: bool,
-    case_sensitive: bool,
-    file_globs: &[String],
-    context_lines: u32,
-    max_results: u32,
-    respect_gitignore: bool,
-) -> Result<SearchResult, String> {
+fn search_native(q: &SearchQuery) -> Result<SearchResult, String> {
+    let SearchQuery {
+        pattern,
+        path,
+        is_regex,
+        case_sensitive,
+        file_globs,
+        context_lines,
+        max_results,
+        respect_gitignore,
+    } = *q;
     let target = Path::new(path);
 
     // Build the matcher
@@ -515,16 +488,16 @@ mod tests {
         let file = dir.join("test.txt");
         std::fs::write(&file, "hello world\ngoodbye world\nhello again\nfoo bar").unwrap();
 
-        let result = search_native(
-            "hello",
-            &file.to_string_lossy(),
-            false,
-            true,
-            &[],
-            0,
-            100,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: "hello",
+            path: &file.to_string_lossy(),
+            is_regex: false,
+            case_sensitive: true,
+            file_globs: &[],
+            context_lines: 0,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
 
         assert_eq!(result.total_matches, 2);
@@ -541,16 +514,16 @@ mod tests {
         let file = dir.join("test.rs");
         std::fs::write(&file, "pub fn foo() {}\nfn bar() {}\npub fn baz() {}").unwrap();
 
-        let result = search_native(
-            r"^pub fn",
-            &file.to_string_lossy(),
-            true,
-            true,
-            &[],
-            0,
-            100,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: r"^pub fn",
+            path: &file.to_string_lossy(),
+            is_regex: true,
+            case_sensitive: true,
+            file_globs: &[],
+            context_lines: 0,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
 
         assert_eq!(result.total_matches, 2);
@@ -565,16 +538,16 @@ mod tests {
         let file = dir.join("test.txt");
         std::fs::write(&file, "Hello World\nhello world\nHELLO WORLD").unwrap();
 
-        let result = search_native(
-            "hello",
-            &file.to_string_lossy(),
-            false,
-            false,
-            &[],
-            0,
-            100,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: "hello",
+            path: &file.to_string_lossy(),
+            is_regex: false,
+            case_sensitive: false,
+            file_globs: &[],
+            context_lines: 0,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
 
         assert_eq!(result.total_matches, 3);
@@ -589,16 +562,16 @@ mod tests {
         let file = dir.join("test.txt");
         std::fs::write(&file, "line1\nline2\nMATCH\nline4\nline5").unwrap();
 
-        let result = search_native(
-            "MATCH",
-            &file.to_string_lossy(),
-            false,
-            true,
-            &[],
-            1,
-            100,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: "MATCH",
+            path: &file.to_string_lossy(),
+            is_regex: false,
+            case_sensitive: true,
+            file_globs: &[],
+            context_lines: 1,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
 
         assert_eq!(result.total_matches, 1);
@@ -617,30 +590,30 @@ mod tests {
         std::fs::write(dir.join("c.rs"), "no match here").unwrap();
 
         // Search all files
-        let result = search_native(
-            "findme",
-            &dir.to_string_lossy(),
-            false,
-            true,
-            &[],
-            0,
-            100,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: "findme",
+            path: &dir.to_string_lossy(),
+            is_regex: false,
+            case_sensitive: true,
+            file_globs: &[],
+            context_lines: 0,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
         assert_eq!(result.total_matches, 2);
 
         // Search with glob filter
-        let result_filtered = search_native(
-            "findme",
-            &dir.to_string_lossy(),
-            false,
-            true,
-            &["*.txt".to_string()],
-            0,
-            100,
-            false,
-        )
+        let result_filtered = search_native(&SearchQuery {
+            pattern: "findme",
+            path: &dir.to_string_lossy(),
+            is_regex: false,
+            case_sensitive: true,
+            file_globs: &["*.txt".to_string()],
+            context_lines: 0,
+            max_results: 100,
+            respect_gitignore: false,
+        })
         .unwrap();
         assert_eq!(result_filtered.total_matches, 2);
 
@@ -657,16 +630,16 @@ mod tests {
             .join("\n");
         std::fs::write(dir.join("test.txt"), &content).unwrap();
 
-        let result = search_native(
-            "match",
-            &dir.join("test.txt").to_string_lossy(),
-            false,
-            true,
-            &[],
-            0,
-            5,
-            false,
-        )
+        let result = search_native(&SearchQuery {
+            pattern: "match",
+            path: &dir.join("test.txt").to_string_lossy(),
+            is_regex: false,
+            case_sensitive: true,
+            file_globs: &[],
+            context_lines: 0,
+            max_results: 5,
+            respect_gitignore: false,
+        })
         .unwrap();
 
         assert_eq!(result.total_matches, 5);

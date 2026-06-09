@@ -140,7 +140,7 @@ pub fn file_write(
     let lines_written = content.lines().count();
     let created = !canonical.exists();
 
-    fs::write(&canonical, content).map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+    super::atomic_write(&canonical, content.as_bytes())?;
 
     Ok(json!({
         "bytes_written": bytes_written,
@@ -184,9 +184,8 @@ pub fn file_write_chunked(
                 Err(_) => path_guard.validate_new(path)?,
             };
 
-            // Create/truncate and write first chunk
-            fs::write(&canonical, content)
-                .map_err(|e| SurgicalError::io_error(&e, "Write failed"))?;
+            // Create/truncate and write first chunk (atomic: temp + rename)
+            super::atomic_write(&canonical, content.as_bytes())?;
 
             let lines_in_chunk = content.lines().count() as u32;
             let bytes = content.len() as u64;
@@ -242,6 +241,7 @@ pub fn file_write_chunked(
             }
 
             // Append chunk
+            // Non-atomic: append cannot use temp+rename without losing existing content.
             let mut file = fs::OpenOptions::new()
                 .append(true)
                 .open(&canonical)
@@ -690,5 +690,44 @@ mod tests {
 
         fs::remove_file(&src).ok();
         fs::remove_file(&dst).ok();
+    }
+
+    #[test]
+    fn test_atomic_write_cleans_temp_on_rename_failure() {
+        // Make the destination a directory so the rename fails; the temp file
+        // must be cleaned up and the destination left untouched.
+        let dir = std::env::temp_dir().join("surgicalfs_atomic_renamefail_dir");
+        let tmp = std::env::temp_dir().join("surgicalfs_atomic_renamefail_dir.surgicalfs-tmp");
+        fs::remove_dir_all(&dir).ok();
+        fs::remove_file(&tmp).ok();
+        fs::create_dir(&dir).unwrap();
+
+        let result = crate::tools::atomic_write(&dir, b"should not land");
+        assert!(result.is_err(), "rename over a directory must fail");
+        assert!(
+            !tmp.exists(),
+            "temp file must be cleaned up on rename failure"
+        );
+        assert!(dir.is_dir(), "destination directory must be untouched");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_file_write_leaves_no_temp_file() {
+        let guard = test_guard();
+        let path = std::env::temp_dir().join("surgicalfs_atomic_filewrite.txt");
+        let tmp = std::env::temp_dir().join("surgicalfs_atomic_filewrite.txt.surgicalfs-tmp");
+        fs::remove_file(&path).ok();
+        fs::remove_file(&tmp).ok();
+
+        file_write(&guard, &path.to_string_lossy(), "atomic body", None).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "atomic body");
+        assert!(
+            !tmp.exists(),
+            "file_write must not leave a .surgicalfs-tmp behind"
+        );
+
+        fs::remove_file(&path).ok();
     }
 }

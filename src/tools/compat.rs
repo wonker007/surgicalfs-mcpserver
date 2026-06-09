@@ -816,7 +816,7 @@ mod tests {
 
         let result = read_media_file(&guard, &path.to_string_lossy()).unwrap();
         assert_eq!(result["mime_type"], "image/png");
-        assert!(result["data_base64"].as_str().unwrap().len() > 0);
+        assert!(!result["data_base64"].as_str().unwrap().is_empty());
         assert_eq!(result["size_bytes"], png_bytes.len());
 
         fs::remove_file(&path).ok();
