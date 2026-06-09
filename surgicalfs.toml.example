@@ -112,3 +112,26 @@ truncation_mode = "smart"
 #     enable = ["inspect", "search", "mutate", "json", "csv", "document", "spreadsheet", "manage", "directory", "utility"]
 #
 # enable = ["inspect", "search", "mutate", "manage", "directory", "utility"]
+
+[runtime]
+# ============================================================================
+# PROCESS LIFECYCLE
+# ============================================================================
+# Seconds of no tool activity after which the server self-exits (0 = never).
+#
+# Leave 0 for local stdio clients (Claude Desktop, Cursor, VS Code, etc.): the
+# client closes stdin when it shuts down — that is the real exit signal — and an
+# idle pause mid-session is normal, so a timer would kill a live server.
+#
+# Set a non-zero value ONLY for remote deployments behind `supergateway`, whose
+# stateless streamableHttp mode spawns a fresh child per request and cannot
+# reliably reap it on Windows. Without a self-imposed idle exit those children
+# accumulate as orphans until the gateway exhausts its handles. See src/lifecycle.rs.
+#   - Stateless supergateway (one child per request): 30 is plenty — each child
+#     is single-shot, so it self-reaps ~30s after its one request.
+#   - Stateful supergateway (one child per session): use a value LARGER than the
+#     longest expected mid-conversation pause (e.g. 600), or a session's child
+#     will be killed during think-time and the session will break.
+#
+# Can also be set via CLI (overrides this value): surgicalfs-mcp --idle-timeout-secs 30
+# idle_timeout_secs = 0

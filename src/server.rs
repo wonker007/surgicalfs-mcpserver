@@ -494,6 +494,10 @@ pub struct SurgicalFsServer {
     write_sessions: std::sync::Arc<WriteSessionManager>,
     tool_router: ToolRouter<Self>,
     enabled_tools: std::collections::HashSet<String>,
+    /// Tracks last-activity time and in-flight request count so the idle
+    /// watchdog in main() can self-reap this process when an upstream
+    /// supervisor orphans it. See `crate::lifecycle`.
+    activity: std::sync::Arc<crate::lifecycle::ActivityTracker>,
 }
 
 impl SurgicalFsServer {
@@ -528,7 +532,13 @@ impl SurgicalFsServer {
             write_sessions,
             tool_router: Self::tool_router(),
             enabled_tools,
+            activity: crate::lifecycle::ActivityTracker::new(),
         }
+    }
+
+    /// Clone of the activity tracker, handed to the idle watchdog in main().
+    pub fn activity_handle(&self) -> std::sync::Arc<crate::lifecycle::ActivityTracker> {
+        self.activity.clone()
     }
 
     /// Apply response budget to tool output.
@@ -1161,6 +1171,7 @@ impl ServerHandler for SurgicalFsServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        self.activity.touch();
         let all_tools = self.tool_router.list_all();
         let filtered: Vec<_> = all_tools
             .into_iter()
@@ -1178,6 +1189,9 @@ impl ServerHandler for SurgicalFsServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Counts this call as in-flight until the guard drops, then stamps
+        // activity — so the idle watchdog never reaps us mid-response.
+        let _guard = self.activity.in_flight_guard();
         if !self.enabled_tools.contains(&*request.name) {
             // Find which category this tool belongs to
             let name_str: &str = &request.name;

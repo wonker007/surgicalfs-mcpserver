@@ -166,6 +166,7 @@ fn make_config(allowed: &Path) -> Config {
         defaults: DefaultsConfig::default(),
         response_budget: ResponseBudgetConfig::default(),
         tools: Default::default(),
+        runtime: Default::default(),
     }
 }
 
