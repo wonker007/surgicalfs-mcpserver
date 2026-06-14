@@ -276,11 +276,21 @@ mod tests {
 
     #[test]
     fn test_sibling_directory_bypass() {
-        // If allowed is "surgicalfs_allowed", then "surgicalfs_allowed_extra" must be DENIED
-        // This ensures path component comparison, not string prefix matching.
+        // If allowed is "surgicalfs_allowed_<uniq>", then "surgicalfs_allowed_<uniq>_extra"
+        // must be DENIED. This ensures path component comparison, not string prefix matching.
+        // Unique names prevent races under parallel test threads (the old fixed names
+        // collided ~1/8 at high parallelism).
         let temp = std::env::temp_dir();
-        let allowed = temp.join("surgicalfs_allowed");
-        let sibling = temp.join("surgicalfs_allowed_extra");
+        let base = format!(
+            "surgicalfs_allowed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let allowed = temp.join(&base);
+        let sibling = temp.join(format!("{base}_extra"));
         fs::create_dir_all(&allowed).ok();
         fs::create_dir_all(&sibling).ok();
 

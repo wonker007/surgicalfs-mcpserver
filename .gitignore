@@ -4,3 +4,7 @@
 surgicalfs.toml
 .claude/
 .env
+# Per-boot control-plane token (DEC-DRAFT-M) — never commit a secret.
+surgicalfs-ctl.token
+# Runtime tool-toggle sidecar (DEC-DRAFT-C) — runtime state, never git-tracked.
+surgicalfs-state.json

@@ -493,52 +493,46 @@ pub struct SurgicalFsServer {
     search_backend: std::sync::Arc<SearchBackend>,
     write_sessions: std::sync::Arc<WriteSessionManager>,
     tool_router: ToolRouter<Self>,
-    enabled_tools: std::collections::HashSet<String>,
-    /// Tracks last-activity time and in-flight request count so the idle
-    /// watchdog in main() can self-reap this process when an upstream
-    /// supervisor orphans it. See `crate::lifecycle`.
-    activity: std::sync::Arc<crate::lifecycle::ActivityTracker>,
+    /// Process-wide shared state (DEC-DRAFT-L): live tool set, activity tracker,
+    /// metrics, concurrency limiter, event bus, and config snapshot. Cheap to
+    /// clone (`Arc`), so every `SurgicalFsServer` clone observes one instance.
+    shared: std::sync::Arc<crate::shared::SharedState>,
 }
 
 impl SurgicalFsServer {
+    /// Legacy constructor — builds an internal `SharedState`. Used by existing
+    /// tests and by stdio mode (which needs no externally-shared state). The
+    /// tool-set construction now lives in `SharedState::new`.
     pub fn new(config: Config, path_guard: PathGuard) -> Self {
-        let search_backend =
-            std::sync::Arc::new(SearchBackend::detect(&config.search.ripgrep_path));
-        let write_sessions = std::sync::Arc::new(WriteSessionManager::new());
+        // Legacy/stdio path: the config source path isn't threaded here, so the
+        // control plane's `config_source` is `None` (HTTP mode supplies it via
+        // `new_with_shared` + `SharedState::new`).
+        let shared = std::sync::Arc::new(crate::shared::SharedState::new(&config, None));
+        Self::new_with_shared(config, path_guard, shared)
+    }
 
-        let mut enabled_tools = crate::config::enabled_tool_names(&config.tools);
-
-        // In read-only mode, remove all write/mutation tools
-        if config.security.read_only {
-            for name in crate::config::WRITE_TOOL_NAMES {
-                enabled_tools.remove(*name);
-            }
-            tracing::info!("Read-only mode: write tools disabled");
-        }
-
-        tracing::info!(
-            "Enabled tools: {} of {} total",
-            enabled_tools.len(),
-            crate::config::ALL_TOOL_CATEGORIES
-                .iter()
-                .flat_map(|c| crate::config::tools_in_category(c))
-                .count()
-        );
-
+    /// HTTP-mode constructor — takes a pre-built `SharedState` so the server and
+    /// the process-metrics sampler observe one instance. `search_backend` is an
+    /// `Arc` clone of the backend `shared` detected once at startup (no
+    /// per-server re-detection).
+    pub fn new_with_shared(
+        config: Config,
+        path_guard: PathGuard,
+        shared: std::sync::Arc<crate::shared::SharedState>,
+    ) -> Self {
         Self {
             config,
             path_guard,
-            search_backend,
-            write_sessions,
+            search_backend: shared.search_backend.clone(),
+            write_sessions: std::sync::Arc::new(WriteSessionManager::new()),
             tool_router: Self::tool_router(),
-            enabled_tools,
-            activity: crate::lifecycle::ActivityTracker::new(),
+            shared,
         }
     }
 
     /// Clone of the activity tracker, handed to the idle watchdog in main().
     pub fn activity_handle(&self) -> std::sync::Arc<crate::lifecycle::ActivityTracker> {
-        self.activity.clone()
+        self.shared.activity.clone()
     }
 
     /// Apply response budget to tool output.
@@ -1186,11 +1180,12 @@ impl ServerHandler for SurgicalFsServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        self.activity.touch();
+        self.shared.activity.touch();
         let all_tools = self.tool_router.list_all();
+        let enabled = self.shared.enabled_tools.read().unwrap();
         let filtered: Vec<_> = all_tools
             .into_iter()
-            .filter(|t| self.enabled_tools.contains(&*t.name))
+            .filter(|t| enabled.contains(&*t.name))
             .collect();
         Ok(ListToolsResult {
             tools: filtered,
@@ -1206,24 +1201,92 @@ impl ServerHandler for SurgicalFsServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         // Counts this call as in-flight until the guard drops, then stamps
         // activity — so the idle watchdog never reaps us mid-response.
-        let _guard = self.activity.in_flight_guard();
-        if !self.enabled_tools.contains(&*request.name) {
-            // Find which category this tool belongs to
-            let name_str: &str = &request.name;
-            let category = crate::config::ALL_TOOL_CATEGORIES
-                .iter()
-                .find(|cat| crate::config::tools_in_category(cat).contains(&name_str))
-                .unwrap_or(&"unknown");
-            return Err(rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-                format!(
-                    "Tool '{}' is not enabled. Enable the '{}' category in surgicalfs.toml [tools] section.",
-                    request.name, category
-                ),
+        let _guard = self.shared.activity.in_flight_guard();
+
+        // Concurrency limiter (DEC-DRAFT-I): reject immediately at capacity. This
+        // bounds only tool execution — `/health`, `initialize`, and `tools/list`
+        // stay responsive — and surfaces as a JSON-RPC error (HTTP 200 body),
+        // consistent with the MCP error model (prompt §4.4 design note).
+        let _permit = self.shared.concurrency.try_acquire().map_err(|_| {
+            rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::INTERNAL_ERROR,
+                "Server at capacity, try again later".to_string(),
                 None,
-            ));
+            )
+        })?;
+
+        // Scope the read lock so it is released before the blocking dispatch
+        // below — the lock is never held across `block_in_place`.
+        {
+            let enabled = self.shared.enabled_tools.read().unwrap();
+            if !enabled.contains(&*request.name) {
+                // Find which category this tool belongs to
+                let name_str: &str = &request.name;
+                let category = crate::config::ALL_TOOL_CATEGORIES
+                    .iter()
+                    .find(|cat| crate::config::tools_in_category(cat).contains(&name_str))
+                    .unwrap_or(&"unknown");
+                return Err(rmcp::ErrorData::new(
+                    rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                    format!(
+                        "Tool '{}' is not enabled. Enable the '{}' category in surgicalfs.toml [tools] section.",
+                        request.name, category
+                    ),
+                    None,
+                ));
+            }
         }
+
+        let tool_name = request.name.to_string();
+        // Build the redacted arg summary BEFORE `request` is moved into
+        // `ToolCallContext::new`. `arguments` is `Option<JsonObject>`
+        // (= `Option<serde_json::Map<String, Value>>`); `redact` never emits raw
+        // content (DEC-DRAFT-N).
+        let args_summary = crate::redact::summarize_args(&request.name, request.arguments.as_ref());
+        let start = std::time::Instant::now();
+
         let tcc = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tcc).await
+        // Tool bodies are synchronous blocking `std::fs` work (DEC-DRAFT-T,
+        // refining DEC-DRAFT-O). Run them on a thread Tokio knows is blocking so
+        // a slow/wedged syscall cannot starve the async workers (which would also
+        // prevent any request-timeout layer from firing). `block_in_place` keeps
+        // `&self` valid (no `'static` requirement) and requires the multi-thread
+        // runtime that both transports use (`#[tokio::main]`).
+        let result = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.tool_router.call(tcc))
+        });
+
+        // Metrics are always recorded. NOTE: `success` reflects the protocol-level
+        // Result, not tool-level success — tool bodies return `String` and surface
+        // their own errors as a *successful* CallToolResult whose JSON body carries
+        // the error (see `budget()`), so `requests_errors` counts only protocol
+        // failures (parse / not-enabled / at-capacity, which return earlier) and
+        // reads ~0 in practice. A Stage 3 tool-error rate must come from response
+        // content, not this counter.
+        let duration = start.elapsed();
+        let success = result.is_ok();
+        self.shared.metrics.record_call(duration, success);
+
+        // Event emission is best-effort and skipped when no subscriber is attached
+        // (none until Stage 3) — this avoids Debug-formatting the (budget-capped,
+        // up to ~32 KiB) response on the hot path only to drop the event.
+        if self.shared.event_bus.receiver_count() > 0 {
+            let result_size = result
+                .as_ref()
+                .map(|r| format!("{:?}", r).len())
+                .unwrap_or(0);
+            let _ = self
+                .shared
+                .event_bus
+                .send(crate::shared::ActivityEvent::ToolCall {
+                    tool: tool_name,
+                    args_summary,
+                    duration_ms: duration.as_millis() as u64,
+                    result_size,
+                    status: if success { "ok".into() } else { "error".into() },
+                });
+        }
+
+        result
     }
 }

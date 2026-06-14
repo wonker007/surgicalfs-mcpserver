@@ -7,6 +7,60 @@
 # Or specify via CLI: surgicalfs-mcp.exe --config "C:\path\to\surgicalfs.toml"
 # ============================================================================
 
+[server]
+# ============================================================================
+# HTTP TRANSPORT & AUTHENTICATION
+# These settings apply only when running in HTTP mode (--transport http).
+# For local stdio clients (Claude Desktop, Cursor), this section is ignored.
+# ============================================================================
+
+# Transport mode: "stdio" (default) or "http".
+# - stdio: standard input/output, used by Claude Desktop and IDE integrations.
+# - http: Streamable HTTP on the bind address below. Used for remote access
+#   via Cloudflare Tunnel (or any reverse proxy).
+# Can also be set via CLI: surgicalfs-mcp --transport http
+# transport = "stdio"
+
+# HTTP bind address (default: 127.0.0.1:8787).
+# WARNING: Binding to 0.0.0.0 exposes the server on ALL network interfaces.
+# For remote access, keep this as 127.0.0.1 and route through a tunnel.
+# Can also be set via CLI: surgicalfs-mcp --bind 127.0.0.1:8787
+# bind = "127.0.0.1:8787"
+
+# Control-plane bind address (default: 127.0.0.1:9787).
+# Serves the monitoring dashboard, metrics, and admin API.
+# MUST remain localhost-only — never expose to the public internet.
+# control_bind = "127.0.0.1:9787"
+
+
+# Bearer token for the /mcp endpoint. When set, requests must include:
+#   Authorization: Bearer <your-token-here>
+# When empty (default), /mcp accepts unauthenticated requests.
+#
+# COMPATIBILITY NOTE: Claude.ai's web connector (custom integrations) does
+# NOT support custom Authorization headers — it only supports OAuth 2.1.
+# Setting auth_token will lock out the web connector with no way to send
+# the token. For Claude.ai web access, leave this empty and rely on
+# the Cloudflare WAF IP-allowlist (or Cloudflare Access) as the auth layer.
+#
+# auth_token IS effective for: Claude Desktop (JSON config `headers`),
+# Claude Code (MCP config), API consumers (`authorization_token` field),
+# and any client that supports custom HTTP headers.
+#
+# Generate a cryptographically strong token (256-bit / 32-byte CSPRNG):
+#   PowerShell:  [Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32))
+#   Linux/macOS: openssl rand -base64 32
+#
+# auth_token = ""
+
+# Per-request timeout in seconds (default: 120).
+# Aborts hung tool calls with a JSON-RPC error instead of blocking forever.
+# request_timeout_secs = 120
+
+# Maximum concurrent in-flight requests (default: 10).
+# Requests beyond this cap receive HTTP 503 with Retry-After.
+# max_concurrent_requests = 10
+
 [security]
 # REQUIRED: At least one directory must be allowlisted.
 # The server will ONLY access files within these directories.

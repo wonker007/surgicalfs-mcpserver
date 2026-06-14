@@ -2,7 +2,7 @@
 
 High-performance, context-efficient filesystem MCP server built in Rust. Designed as a drop-in replacement for the default `@modelcontextprotocol/server-filesystem` — with surgical read/write operations, structured file format support, and aggressive context window optimization.
 
-**Version: 0.4.2** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
+**Version: 0.5.0** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
 
 Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Zed, ChatGPT (via remote MCP), Gemini, and more.
 
@@ -231,6 +231,93 @@ idle_timeout_secs = 0          # self-exit after N idle seconds (0 = never).
 
 ---
 
+## Remote Access (HTTP Transport)
+
+SurgicalFS can run as a long-lived HTTP server for remote MCP access — through a reverse proxy, Cloudflare Tunnel, or any HTTP-forwarding infrastructure.
+
+### Transport selector
+
+```bash
+# stdio (default) — for local MCP clients
+surgicalfs-mcp
+
+# HTTP — for remote access
+surgicalfs-mcp --transport http --bind 127.0.0.1:8787
+```
+
+Or set in the config file:
+
+```toml
+[server]
+transport = "http"
+bind = "127.0.0.1:8787"
+```
+
+In HTTP mode, the server exposes `/mcp` as a stateless JSON-RPC endpoint (POST only) and `/health` as an unauthenticated liveness probe.
+
+### Authentication
+
+The `[server] auth_token` field enables bearer token authentication on `/mcp`:
+
+```toml
+[server]
+auth_token = "your-secret-token"
+```
+
+When set, requests must include `Authorization: Bearer <token>`. When empty (default), `/mcp` is unauthenticated — suitable for localhost or network-level auth.
+
+**Client compatibility:** Bearer auth works with Claude Desktop (via `headers` in JSON config), Claude Code (`authorization_token`), and API consumers. Claude.ai's web connector does not support custom headers; use network-level auth (IP allowlists, Cloudflare Access) for that client.
+
+See `surgicalfs.toml.example` for the full `[server]` configuration reference, including `request_timeout_secs` and `max_concurrent_requests`.
+
+### Control plane
+
+HTTP mode starts a second listener for operator monitoring and control (default `127.0.0.1:9787`, never exposed publicly):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /dashboard` | Browser-based monitoring UI |
+| `GET /health` | Liveness: status, version, uptime, RSS, handle count |
+| `GET /ready` | Readiness: config source, directory reachability |
+| `GET /metrics` | Request counters, latency buckets, process metrics |
+| `GET /events` | SSE stream of tool calls and system events |
+| `GET /admin/tools` | Tool inventory by category with enabled/disabled status |
+| `POST /admin/tools` | Enable/disable tools at runtime (see below) |
+
+The control plane authenticates with a per-boot token (auto-generated, written to `surgicalfs-ctl.token`). The dashboard handles this automatically.
+
+### Runtime tool toggle
+
+Tools can be enabled or disabled at runtime without restarting:
+
+```bash
+curl -X POST http://127.0.0.1:9787/admin/tools \
+  -H "Authorization: Bearer $(cat surgicalfs-ctl.token)" \
+  -H "X-SurgicalFS-Ctl: 1" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"disable","targets":["mutate"]}'
+```
+
+Actions: `enable`, `disable`, `set` (replace the entire enabled set). Targets can be category names or individual tool names. Changes take effect immediately for all MCP clients and persist across restarts via a sidecar state file (`surgicalfs-state.json`). Delete the sidecar to reset to TOML defaults.
+
+In read-only mode (`--read-only`), write tools cannot be re-enabled via toggle.
+
+### Running as a Windows Service
+
+Use [Shawl](https://github.com/mtkennerly/shawl) to run SurgicalFS as a Windows Service with auto-start and restart-on-failure:
+
+```powershell
+shawl add --name SurgicalFS-MCP --restart-if-not 0 --stop-timeout 10000 -- `
+    "C:\path\to\surgicalfs-mcp.exe" --config surgicalfs.toml --transport http --bind 127.0.0.1:8787
+
+Set-Service -Name SurgicalFS-MCP -StartupType Automatic
+Start-Service SurgicalFS-MCP
+```
+
+The server responds to Ctrl+C (or service stop) with graceful shutdown: stops accepting, drains in-flight requests, then exits.
+
+---
+
 ## Tools Reference
 
 SurgicalFS provides 47 tools across 11 categories: surgical operations purpose-built for context efficiency, plus a backwards-compatible layer that mirrors the default MCP filesystem server.
@@ -408,6 +495,13 @@ src/
 ├── search_backend.rs    # ripgrep (preferred) / native Rust (fallback) search
 ├── response_budget.rs   # Hard response truncation (char-boundary safe)
 ├── errors.rs            # Structured errors with suggestions
+├── lifecycle.rs         # Exit triggers, idle self-reap, temp-file sweep
+├── handler.rs           # Stateless HTTP handler (JSON-RPC dispatch)
+├── shared.rs            # SharedState: tool set, metrics, activity, events
+├── metrics.rs           # Lock-free counters, latency buckets, process sampler
+├── control.rs           # Control-plane routes, auth, SSE, dashboard
+├── redact.rs            # Positive-allowlist arg redaction for /events
+├── state.rs             # Per-boot control token, sidecar state persistence
 └── tools/
     ├── inspect.rs       # file_info, file_head, file_tail, file_read_lines
     ├── search.rs        # file_search, file_grep, file_search_replace_preview
@@ -430,6 +524,9 @@ src/
 - **Case-insensitive paths** — Windows drive letters and paths handled correctly via `dunce`
 - **No `unsafe` blocks** — zero unsafe Rust in the entire codebase
 - **Zero `cargo audit` advisories** — no known dependency vulnerabilities
+- **Atomic writes** — all file mutations use temp-write + rename, preventing torn files from crashes
+- **Bearer auth** — optional token-based auth for the MCP endpoint (HTTP mode)
+- **Control-plane isolation** — monitoring/admin on a separate localhost-only listener with per-boot CSRF-protected auth
 
 ### Search Backend
 
@@ -458,7 +555,7 @@ This ensures that even if a tool produces a large result, the context window imp
 ```bash
 cargo build              # Debug build
 cargo build --release    # Optimized, stripped, LTO-enabled release build
-cargo test               # Run all tests (~145 tests)
+cargo test               # Run all tests (~331 tests)
 cargo clippy             # Lint (zero warnings policy)
 cargo fmt                # Format
 cargo audit              # Dependency vulnerability scan (zero advisories)
@@ -501,6 +598,7 @@ codegen-units = 1
 
 | Version | Changes |
 |---------|---------|
+| **v0.5.0** | **Major reliability overhaul.** Native HTTP transport replaces Node/supergateway bridge — single Rust process, zero per-request spawning. Control plane: localhost dashboard with live metrics, SSE activity stream, and runtime tool toggle. SharedState architecture: lock-free metrics (request counters, latency histogram, process self-watch), concurrency semaphore, broadcast event bus. Sidecar tool-toggle persistence (survives restart). Structured rolling-JSON logging. Atomic writes for all file mutations. Self-maintenance: orphaned temp-file sweep. Windows Service support via Shawl. 331 tests, 47 tools (unchanged). |
 | **v0.4.2** | Idle self-reap to prevent orphaned processes behind stateless `supergateway` on Windows. New `[runtime] idle_timeout_secs` config + `--idle-timeout-secs` CLI flag (default 0 = off; local clients unaffected). Lifecycle logic consolidated into `src/lifecycle.rs` with an in-flight guard so a process is never reaped mid-response. |
 | **v0.4.1** | Security audit fixes: integer overflow in `file_grep` pagination (switched to `saturating_add`). Config validation for empty/invalid tool category names. Updated tool descriptions for `expected_content`. Edge case tests for CRLF content verification and overflow saturation. |
 | **v0.4.0** | Config-driven tool categories (`[tools] enable`). `.gitignore` support via `ignore` crate. `--read-only` CLI flag. Search pagination (`offset` param). Content verification (`expected_content` on `file_patch_lines` and `file_insert`). |
@@ -516,6 +614,7 @@ codegen-units = 1
 
 ## Roadmap
 
+- [x] **HTTP transport + control plane** — remote access, monitoring dashboard, runtime tool toggle (v0.5.0)
 - [ ] **MCP Roots protocol support** — dynamic directory updates from clients without server restart
 - [ ] **File diff tool** — unified diff between two files for code review workflows
 - [ ] **ZIP/archive support** — create and extract archives

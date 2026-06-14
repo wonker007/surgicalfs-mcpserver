@@ -15,6 +15,10 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub logging: LoggingConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -80,6 +84,59 @@ pub struct RuntimeConfig {
     /// IDEs), where an idle pause is normal and stdin-EOF is the real shutdown.
     #[serde(default)]
     pub idle_timeout_secs: u64,
+}
+
+/// HTTP / network server settings (DOC-002 §2.2, §5).
+///
+/// Stage 1 wires `transport`, `bind`, and `auth_token` (the `/mcp` bearer);
+/// Stage 2 wires `max_concurrent_requests` as the `SharedState::concurrency`
+/// Semaphore (DEC-DRAFT-I — a Semaphore, NOT a tower layer; see prompt §4.4);
+/// Stage 3 wires `control_bind` (the control-plane listener). `request_timeout_secs`
+/// stays declared-but-unwired (deferred past Stage 2 — `tokio::time::timeout`
+/// can't cancel blocking I/O in `block_in_place`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerConfig {
+    /// Transport: "stdio" (default) or "http". CLI `--transport` overrides this.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// MCP data-plane bind address for HTTP transport. CLI `--bind` overrides this.
+    #[serde(default = "default_bind")]
+    pub bind: String,
+    /// Control-plane bind address (Stage 3). Localhost-only operator surface,
+    /// served by `run_http` on a second listener and copied into `ConfigSnapshot`.
+    #[serde(default = "default_control_bind")]
+    pub control_bind: String,
+    /// Bearer token required on `/mcp` in HTTP mode. Empty = auth disabled.
+    #[serde(default)]
+    pub auth_token: String,
+    /// Per-request timeout in seconds (Stage 2 placeholder; not yet wired).
+    /// `allow(dead_code)`: consumed by the Stage 2 tower timeout layer (DEC-DRAFT-I).
+    #[serde(default = "default_request_timeout_secs")]
+    #[allow(dead_code)]
+    pub request_timeout_secs: u64,
+    /// Max concurrent in-flight tool calls (DEC-DRAFT-I). Wired in Stage 2 as the
+    /// `SharedState::concurrency` Semaphore: `call_tool` `try_acquire`s a permit
+    /// and returns a "Server at capacity" JSON-RPC error when exhausted. A value
+    /// of 0 therefore rejects every tool call.
+    #[serde(default = "default_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+}
+
+/// Structured-logging settings (DOC-002 §6.2). Added in Stage 2 (ACT-DRAFT-C).
+/// `log_dir` empty = stderr only (backward compatible with every prior config).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct LoggingConfig {
+    /// Directory for rolling daily JSON log files. Empty = no file logging.
+    #[serde(default)]
+    pub log_dir: String,
+
+    /// Days to retain rotated log files (0 = unlimited). tracing-appender does
+    /// not auto-delete; retention/cleanup is a Stage 5 concern.
+    /// `allow(dead_code)`: parsed now so the `[logging]` schema is stable;
+    /// consumed once Stage 5 adds log cleanup.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub retention_days: u32,
 }
 
 /// All valid tool category names.
@@ -216,6 +273,34 @@ fn default_max_response_bytes() -> u32 {
 fn default_truncation_mode() -> String {
     "smart".into()
 }
+fn default_transport() -> String {
+    "stdio".into()
+}
+fn default_bind() -> String {
+    "127.0.0.1:8787".into()
+}
+fn default_control_bind() -> String {
+    "127.0.0.1:9787".into()
+}
+fn default_request_timeout_secs() -> u64 {
+    120
+}
+fn default_max_concurrent_requests() -> usize {
+    10
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            transport: default_transport(),
+            bind: default_bind(),
+            control_bind: default_control_bind(),
+            auth_token: String::new(),
+            request_timeout_secs: default_request_timeout_secs(),
+            max_concurrent_requests: default_max_concurrent_requests(),
+        }
+    }
+}
 
 impl Default for SearchConfig {
     fn default() -> Self {
@@ -299,6 +384,8 @@ impl Config {
             response_budget: ResponseBudgetConfig::default(),
             tools: ToolsConfig::default(),
             runtime: RuntimeConfig::default(),
+            server: ServerConfig::default(),
+            logging: LoggingConfig::default(),
         })
     }
 
@@ -335,6 +422,8 @@ mod tests {
         assert_eq!(config.security.allowed_directories.len(), 1);
         assert_eq!(config.defaults.head_lines, 50);
         assert_eq!(config.response_budget.max_response_lines, 200);
+        // Fallback construction must include [server] defaults (stdio).
+        assert_eq!(config.server.transport, "stdio");
     }
 
     #[test]
@@ -376,5 +465,45 @@ idle_timeout_secs = 30
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.runtime.idle_timeout_secs, 30);
+    }
+
+    #[test]
+    fn test_server_config_defaults_when_absent() {
+        // A config without a [server] section must parse and fall back to
+        // defaults — backward compatibility for every pre-v0.5.0 config file.
+        let toml_str = r#"
+[security]
+allowed_directories = ["C:\\Test"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.transport, "stdio");
+        assert_eq!(config.server.bind, "127.0.0.1:8787");
+        assert_eq!(config.server.control_bind, "127.0.0.1:9787");
+        assert!(config.server.auth_token.is_empty());
+        assert_eq!(config.server.request_timeout_secs, 120);
+        assert_eq!(config.server.max_concurrent_requests, 10);
+    }
+
+    #[test]
+    fn test_server_config_parsed() {
+        let toml_str = r#"
+[security]
+allowed_directories = ["C:\\Test"]
+
+[server]
+transport = "http"
+bind = "0.0.0.0:9999"
+auth_token = "s3cret"
+request_timeout_secs = 60
+max_concurrent_requests = 5
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.server.transport, "http");
+        assert_eq!(config.server.bind, "0.0.0.0:9999");
+        assert_eq!(config.server.auth_token, "s3cret");
+        assert_eq!(config.server.request_timeout_secs, 60);
+        assert_eq!(config.server.max_concurrent_requests, 5);
+        // A field omitted within a present [server] table still defaults.
+        assert_eq!(config.server.control_bind, "127.0.0.1:9787");
     }
 }

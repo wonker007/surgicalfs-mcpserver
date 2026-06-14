@@ -184,6 +184,73 @@ pub async fn stdin_pipe_broken() {
     }
 }
 
+// ─── Self-maintenance: orphaned temp-file sweep (Stage 5, DOC-002 §7.4) ────────
+
+/// Minimum age before an orphaned temp file is reaped. `atomic_write`
+/// (`tools::atomic_write`) writes then renames within milliseconds, so anything
+/// older than this is a genuine orphan from a hard kill — never an in-flight
+/// write. This is what keeps the sweep from racing an active tool call
+/// (STOP §9.3) even in the brief unlocked window between write-close and rename.
+const TMP_SWEEP_MIN_AGE: Duration = Duration::from_secs(60);
+
+/// Sweep orphaned `.surgicalfs-tmp` files from the allowed directories. These are
+/// left behind only when the process is hard-killed between `atomic_write`'s
+/// write and rename. Best-effort: missing/inaccessible dirs and locked files are
+/// logged and skipped, never fatal. Spawned on a timer from `run_http()`.
+pub fn sweep_tmp_files(allowed_dirs: &[String]) {
+    for dir in allowed_dirs {
+        let dir_path = std::path::Path::new(dir);
+        if !dir_path.exists() {
+            continue;
+        }
+        match sweep_dir(dir_path, TMP_SWEEP_MIN_AGE) {
+            Ok(count) if count > 0 => {
+                tracing::info!("Swept {count} orphaned .surgicalfs-tmp file(s) from {dir}");
+            }
+            Ok(_) => {} // nothing to sweep
+            Err(e) => {
+                tracing::warn!("Failed to sweep {dir}: {e}");
+            }
+        }
+    }
+}
+
+/// Remove `.surgicalfs-tmp` files under `dir` older than `min_age`. Returns the
+/// count removed. `min_age` is a parameter (not the const) so tests can sweep
+/// freshly-created files with `Duration::ZERO`.
+fn sweep_dir(dir: &std::path::Path, min_age: Duration) -> std::io::Result<usize> {
+    let mut count = 0;
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(10)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|e| e.to_str()) != Some("surgicalfs-tmp") {
+            continue;
+        }
+        // Skip anything younger than `min_age` (an in-flight atomic write) and
+        // anything we cannot stat — better to leave a file than reap an active one.
+        let too_recent = match path.metadata().and_then(|m| m.modified()) {
+            Ok(mtime) => mtime.elapsed().map(|age| age < min_age).unwrap_or(true),
+            Err(_) => true,
+        };
+        if too_recent {
+            continue;
+        }
+        match std::fs::remove_file(path) {
+            Ok(()) => count += 1,
+            // A locked file (active write on Windows) or a permission error is
+            // skipped, not fatal — it will be swept on a later pass.
+            Err(e) => tracing::warn!("Could not remove {}: {e}", path.display()),
+        }
+    }
+    Ok(count)
+}
+
 #[cfg(windows)]
 extern "system" {
     /// Win32 `PeekNamedPipe` — checks pipe state without consuming data.
@@ -264,5 +331,61 @@ mod tests {
         } // stamps on drop
           // ...and is reset to ~0 right after the guard drops.
         assert!(t.idle_for() < Duration::from_millis(20));
+    }
+
+    // ── Orphaned temp-file sweep (Stage 5) ──
+
+    fn unique_sweep_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sfs-sweep-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sweep_removes_old_tmp_files() {
+        let dir = unique_sweep_dir("old");
+        let tmp = dir.join("report.md.surgicalfs-tmp");
+        std::fs::write(&tmp, b"orphan").unwrap();
+        // min_age 0 → treat as old, so the freshly-created file is reaped.
+        let removed = sweep_dir(&dir, Duration::ZERO).unwrap();
+        assert_eq!(removed, 1);
+        assert!(!tmp.exists(), "orphaned temp file should be removed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_skips_recent_tmp_files() {
+        let dir = unique_sweep_dir("recent");
+        let tmp = dir.join("inflight.txt.surgicalfs-tmp");
+        std::fs::write(&tmp, b"in-flight").unwrap();
+        // A large min_age means a just-created file is "too recent" → preserved,
+        // so the sweep can never race an active atomic write.
+        let removed = sweep_dir(&dir, Duration::from_secs(3600)).unwrap();
+        assert_eq!(removed, 0);
+        assert!(tmp.exists(), "an in-flight temp file must be preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_ignores_non_tmp_files() {
+        let dir = unique_sweep_dir("real");
+        let real = dir.join("keep.txt");
+        std::fs::write(&real, b"real content").unwrap();
+        let removed = sweep_dir(&dir, Duration::ZERO).unwrap();
+        assert_eq!(removed, 0);
+        assert!(real.exists(), "non-temp files must never be touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_tmp_files_tolerates_missing_dir() {
+        // A non-existent allowed dir must not panic or error.
+        let missing = std::env::temp_dir().join("sfs-sweep-does-not-exist-xyz");
+        let _ = std::fs::remove_dir_all(&missing);
+        sweep_tmp_files(&[missing.to_string_lossy().to_string()]);
     }
 }

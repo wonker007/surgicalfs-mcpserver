@@ -251,6 +251,8 @@ mod tests {
             response_budget: Default::default(),
             tools: Default::default(),
             runtime: Default::default(),
+            server: Default::default(),
+            logging: Default::default(),
         }
     }
 
