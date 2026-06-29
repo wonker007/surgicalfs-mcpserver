@@ -770,49 +770,63 @@ async fn admin_auth_post_handler(
 
 // ─── Logging management (Phase 4) ──────────────────────────────────────────────
 
-/// Effective logging state: the `surgicalfs-logging.json` sidecar overrides the
-/// TOML `[logging]`. Returns (enabled, log_dir, retention_days, source,
-/// sidecar_exists, restart_required). `restart_required` is true when the
-/// CONFIGURED (sidecar) state differs from the boot-effective `ConfigSnapshot`
-/// (i.e. a change is staged but the running server hasn't picked it up).
-fn logging_status(shared: &SharedState) -> (bool, String, u32, &'static str, bool, bool) {
-    let cs = &shared.config_snapshot;
-    let path = crate::state::logging_sidecar_path(cs.config_source.as_deref());
-    match crate::state::read_logging_sidecar(&path) {
-        Some(sc) => {
-            let restart = sc.log_dir != cs.log_dir || sc.retention_days != cs.retention_days;
-            (
-                !sc.log_dir.is_empty(),
-                sc.log_dir,
-                sc.retention_days,
-                "sidecar",
-                true,
-                restart,
-            )
-        }
-        None => (
-            !cs.log_dir.is_empty(),
-            cs.log_dir.clone(),
-            cs.retention_days,
-            "config",
-            false,
-            false,
-        ),
-    }
+/// The PENDING logging state recorded in the `surgicalfs-logging.json` sidecar,
+/// read fresh on every call. `None` when no sidecar exists (the server boots
+/// from the TOML `[logging]` default). `enabled` is true when `log_dir` is
+/// non-empty; an empty-dir sidecar is the explicit "off" written by the disable
+/// action (Phase 4.6). `apply_analytics_fallback` mirrors boot so the reported
+/// analytics dir matches what the server will actually do on the next restart.
+struct PendingLogging {
+    enabled: bool,
+    log_dir: String,
+    analytics_log_dir: String,
+    retention_days: u32,
 }
 
-/// `GET /admin/logging` — current logging status (sidecar-aware).
+fn pending_logging(shared: &SharedState) -> Option<PendingLogging> {
+    let cs = &shared.config_snapshot;
+    let path = crate::state::logging_sidecar_path(cs.config_source.as_deref());
+    let mut sc = crate::state::read_logging_sidecar(&path)?;
+    sc.apply_analytics_fallback();
+    Some(PendingLogging {
+        enabled: !sc.log_dir.is_empty(),
+        log_dir: sc.log_dir,
+        analytics_log_dir: sc.analytics_log_dir,
+        retention_days: sc.retention_days,
+    })
+}
+
+/// `GET /admin/logging` — the RUNNING (boot-effective) logging state PLUS the
+/// PENDING on-disk sidecar state, so the dashboard can show "currently X,
+/// pending Y (restart to apply)" and resolve any number of enable/disable
+/// clicks with a single restart (Phase 4.6). `restart_required` is true when a
+/// sidecar is staged whose effective state differs from the running state.
 async fn admin_logging_get_handler(
     State(shared): State<Arc<SharedState>>,
 ) -> Json<serde_json::Value> {
-    let (enabled, log_dir, retention, source, sidecar_exists, restart) = logging_status(&shared);
+    let cs = &shared.config_snapshot;
+    let run_enabled = !cs.log_dir.is_empty();
+    let pending = pending_logging(&shared);
+    let (pending_json, restart_required) = match &pending {
+        Some(p) => (
+            json!({
+                "enabled": p.enabled,
+                "log_dir": p.log_dir.clone(),
+                "analytics_log_dir": p.analytics_log_dir.clone(),
+                "retention_days": p.retention_days,
+            }),
+            p.enabled != run_enabled || p.log_dir != cs.log_dir,
+        ),
+        None => (serde_json::Value::Null, false),
+    };
     Json(json!({
-        "enabled": enabled,
-        "log_dir": log_dir,
-        "retention_days": retention,
-        "source": source,
-        "sidecar_exists": sidecar_exists,
-        "restart_required": restart,
+        "enabled": run_enabled,
+        "log_dir": cs.log_dir.clone(),
+        "retention_days": cs.retention_days,
+        "source": if pending.is_some() { "sidecar" } else { "config" },
+        "sidecar_exists": pending.is_some(),
+        "pending": pending_json,
+        "restart_required": restart_required,
     }))
 }
 
@@ -883,10 +897,17 @@ async fn admin_logging_post_handler(
             })))
         }
         "disable" => {
-            crate::state::clear_logging_sidecar(&path).map_err(|e| {
+            // Phase 4.6: record the "off" intent as an explicit empty-log_dir
+            // sidecar instead of DELETING it. A deleted sidecar fell back to the
+            // running state, so GET looked like a no-op and the operator
+            // restarted twice. With the empty sidecar on disk, GET reports
+            // `pending: {enabled:false}` and the dashboard shows one
+            // "pending: disabled (restart to apply)" banner. The next boot reads
+            // the empty sidecar and starts with logging (and analytics) off.
+            crate::state::write_logging_sidecar(&path, "", 30, "", 90).map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("clear failed: {e}"),
+                    format!("write failed: {e}"),
                 )
             })?;
             Ok(Json(
@@ -1937,10 +1958,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admin_logging_disable_clears_sidecar() {
+    async fn admin_logging_disable_writes_empty_sidecar() {
         let dir = unique_dir("logdisable");
-        // Pre-write a sidecar.
-        crate::state::write_logging_sidecar(&dir.join("surgicalfs-logging.json"), "X", 10, "", 90)
+        // Pre-write an "enabled" sidecar.
+        crate::state::write_logging_sidecar(&dir.join("surgicalfs-logging.json"), "X", 10, "X", 90)
             .unwrap();
         let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
         let resp = router
@@ -1954,9 +1975,47 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["action"], "disable");
+        // Phase 4.6: disable RECORDS the off-intent as an empty-log_dir sidecar
+        // (not a delete), so GET can report pending:disabled and the next boot
+        // starts with logging off.
+        let sidecar = dir.join("surgicalfs-logging.json");
         assert!(
-            !dir.join("surgicalfs-logging.json").exists(),
-            "logging sidecar should be removed on disable"
+            sidecar.exists(),
+            "disable should leave an explicit off sidecar"
+        );
+        let sc = crate::state::read_logging_sidecar(&sidecar).unwrap();
+        assert!(
+            sc.log_dir.is_empty(),
+            "disable sidecar must have empty log_dir"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_logging_get_includes_pending() {
+        let dir = unique_dir("logpending");
+        // Running state = enabled via [logging] log_dir (shared_with_logdir).
+        // Pre-write a DISABLE sidecar (empty log_dir) → pending is disabled,
+        // differs from the running (enabled) state → restart_required true.
+        crate::state::write_logging_sidecar(&dir.join("surgicalfs-logging.json"), "", 0, "", 90)
+            .unwrap();
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(req("/admin/logging", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        // Running stays enabled (boot config); pending reflects the sidecar.
+        assert_eq!(v["enabled"], true, "running state stays enabled");
+        assert!(v["pending"].is_object(), "pending must reflect the sidecar");
+        assert_eq!(
+            v["pending"]["enabled"], false,
+            "empty-dir sidecar = pending disabled"
+        );
+        assert_eq!(
+            v["restart_required"], true,
+            "pending differs from running → restart required"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

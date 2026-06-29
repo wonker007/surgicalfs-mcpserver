@@ -115,7 +115,12 @@ async fn main() -> Result<()> {
     let mut analytics_source = "config";
     let logging_source =
         match state::read_logging_sidecar(&state::logging_sidecar_path(loaded_path.as_deref())) {
-            Some(sc) => {
+            Some(mut sc) => {
+                // Phase 4.6: default analytics to the tracing-log dir when the
+                // sidecar enables file logging but omits analytics (e.g. a
+                // pre-4.5 sidecar), so "Enable Logging" always turns on BOTH
+                // subsystems — no manual `[analytics] log_dir` ever required.
+                sc.apply_analytics_fallback();
                 cfg.logging.log_dir = sc.log_dir;
                 cfg.logging.retention_days = sc.retention_days;
                 // Phase 4.5: the same sidecar also overrides analytics logging, so

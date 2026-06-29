@@ -685,7 +685,10 @@ mod tests {
         // The path IS the allowed dir — no component after the prefix.
         assert_eq!(repo_from_path("C:\\Users\\example\\projects", &dirs), None);
         // Trailing separator must not change that.
-        assert_eq!(repo_from_path("C:\\Users\\example\\projects\\", &dirs), None);
+        assert_eq!(
+            repo_from_path("C:\\Users\\example\\projects\\", &dirs),
+            None
+        );
     }
 
     // ── counters ──

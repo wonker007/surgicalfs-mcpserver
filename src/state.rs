@@ -249,6 +249,24 @@ fn default_analytics_retention() -> u32 {
     90
 }
 
+impl LoggingSidecar {
+    /// Phase 4.6: when file logging is enabled (`log_dir` non-empty) but the
+    /// sidecar omits an analytics dir — e.g. a pre-4.5 sidecar, where
+    /// `analytics_log_dir` deserializes to "" — default analytics to the same
+    /// directory so a single "Enable Logging" toggle drives BOTH subsystems.
+    /// Analytics is NEVER force-enabled when file logging itself is off (empty
+    /// `log_dir`). A non-empty analytics dir with zero retention is clamped to
+    /// the default so it does not prune immediately.
+    pub fn apply_analytics_fallback(&mut self) {
+        if !self.log_dir.is_empty() && self.analytics_log_dir.is_empty() {
+            self.analytics_log_dir = self.log_dir.clone();
+        }
+        if !self.analytics_log_dir.is_empty() && self.analytics_retention_days == 0 {
+            self.analytics_retention_days = default_analytics_retention();
+        }
+    }
+}
+
 /// Derive the logging sidecar path: next to the config file, or in the temp dir.
 pub fn logging_sidecar_path(config_path: Option<&Path>) -> PathBuf {
     if let Some(cfg) = config_path {
@@ -290,7 +308,11 @@ pub fn read_logging_sidecar(path: &Path) -> Option<LoggingSidecar> {
 }
 
 /// Delete the logging sidecar (reset to the TOML default on next boot). Succeeds
-/// if the file is already absent.
+/// if the file is already absent. Retained utility (mirrors `clear_auth_sidecar`):
+/// since Phase 4.6 the `disable` action WRITES an empty sidecar instead of
+/// deleting, so this has no non-test caller — kept for a future "reset to TOML
+/// default" and exercised by the round-trip test.
+#[allow(dead_code)]
 pub fn clear_logging_sidecar(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
@@ -563,5 +585,42 @@ mod tests {
         assert_eq!(s.analytics_log_dir, "");
         assert_eq!(s.analytics_retention_days, 90);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn analytics_defaults_to_log_dir_when_empty() {
+        // Phase 4.6: a pre-4.5 sidecar (log_dir set, analytics_log_dir empty)
+        // gets analytics defaulted to the same dir + default retention, so one
+        // "Enable Logging" toggle drives BOTH subsystems.
+        let mut sc = LoggingSidecar {
+            log_dir: "C:\\logs".to_string(),
+            retention_days: 15,
+            analytics_log_dir: String::new(),
+            analytics_retention_days: 0,
+        };
+        sc.apply_analytics_fallback();
+        assert_eq!(sc.analytics_log_dir, "C:\\logs");
+        assert_eq!(sc.analytics_retention_days, 90);
+
+        // A disabled sidecar (empty log_dir) must NOT force analytics on.
+        let mut off = LoggingSidecar {
+            log_dir: String::new(),
+            retention_days: 0,
+            analytics_log_dir: String::new(),
+            analytics_retention_days: 0,
+        };
+        off.apply_analytics_fallback();
+        assert!(off.analytics_log_dir.is_empty());
+
+        // An explicit analytics dir is preserved (not clobbered).
+        let mut keep = LoggingSidecar {
+            log_dir: "C:\\logs".to_string(),
+            retention_days: 30,
+            analytics_log_dir: "C:\\other".to_string(),
+            analytics_retention_days: 45,
+        };
+        keep.apply_analytics_fallback();
+        assert_eq!(keep.analytics_log_dir, "C:\\other");
+        assert_eq!(keep.analytics_retention_days, 45);
     }
 }

@@ -603,21 +603,48 @@ async function loadLogs() {
   $('logStatus').textContent = 'loading…';
   const n = $('logLines').value;
   try {
-    const d = await fetch('/logs?lines=' + encodeURIComponent(n), { headers: HEADERS }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-    renderLogs(d);
+    // Fetch the log tail (running state) AND the sidecar status (pending state)
+    // together, so the panel can show a "pending: enabled/disabled on restart"
+    // banner and resolve any number of enable/disable clicks with ONE restart
+    // (Phase 4.6).
+    const [d, status] = await Promise.all([
+      fetch('/logs?lines=' + encodeURIComponent(n), { headers: HEADERS }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+      fetch('/admin/logging', { headers: HEADERS }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+    renderLogs(d, status);
   } catch (e) {
     $('logStatus').textContent = 'failed to load';
     $('logBody').innerHTML = '<div class="feed-empty">Could not load logs.</div>';
   }
 }
-function renderLogs(d) {
+// Amber "pending change" banner — shown when the on-disk sidecar differs from
+// the running state. A restart applies the LATEST sidecar write (Phase 4.6).
+function loggingPendingBanner(status) {
+  if (!status || !status.restart_required || !status.pending) return '';
+  const willBe = status.pending.enabled ? 'enabled' : 'disabled';
+  return `<div class="banner warn" style="margin-bottom:10px"><span>Pending: file logging will be <b>${willBe}</b> on restart.</span>`
+    + `<button class="srv-btn" style="margin-left:auto" onclick="confirmServerAction('restart')">Restart now</button></div>`;
+}
+function renderLogs(d, status) {
+  const banner = loggingPendingBanner(status);
+  // The action button offers the OPPOSITE of the EFFECTIVE next-boot state
+  // (pending if staged, else running), so enable<->disable can flip freely
+  // before a single restart — both actions stay reachable regardless of state.
+  const effEnabled = (status && status.pending) ? status.pending.enabled : d.enabled;
+  const actionBtn = effEnabled
+    ? `<button class="srv-btn danger" onclick="disableLogging()">Disable Logging</button>`
+    : `<button class="srv-btn" onclick="enableLogging()">Enable Logging</button>`;
   if (!d.enabled) {
-    // Actionable enable panel instead of a dead-end message (Phase 4 §2.1).
-    $('logStatus').textContent = 'logging: disabled';
-    $('logBody').innerHTML =
+    // Running logging is OFF — no live files. Show the enable/pending panel.
+    const pendingOn = !!(status && status.pending && status.pending.enabled);
+    $('logStatus').textContent = pendingOn ? 'logging: off (pending: enabled — restart to apply)' : 'logging: disabled';
+    const intro = pendingOn
+      ? 'File logging will be <b>enabled</b> on the next restart.'
+      : 'File logging is not enabled. Enable it to view logs, unlock analytics history (today/7d/30d), latency comparisons, and export.';
+    $('logBody').innerHTML = banner +
       `<div class="auth-box">
-        <div style="font-size:13px;margin-bottom:10px">File logging is not enabled. Enable it to view logs, unlock analytics history (today/7d/30d), latency comparisons, and export.</div>
-        <button class="srv-btn" onclick="enableLogging()">Enable Logging</button>
+        <div style="font-size:13px;margin-bottom:10px">${intro}</div>
+        ${actionBtn}
         <span style="font-size:12px;color:var(--text-dim);margin-left:8px">(default: &lt;config dir&gt;\\logs · 30-day retention)</span>
         <div id="loggingResult" style="margin-top:8px"></div>
         <div style="font-size:12px;color:var(--text-dim);margin-top:8px">A server restart is required for the change to take effect.</div>
@@ -632,27 +659,35 @@ function renderLogs(d) {
     `<div class="log-file"><span class="lf-dl" onclick="downloadLog(${i})">&darr;</span>
       <span>${escHtml(f.name)}</span><span style="color:var(--text-dim)">(${fmtBytes(f.size_bytes)})</span></div>`).join('');
   const tail = (d.tail || []).map(renderLogLine).join('');
-  $('logBody').innerHTML =
-    `<div style="margin-bottom:8px"><button class="srv-btn danger" onclick="disableLogging()">Disable Logging</button><span id="loggingResult" style="margin-left:8px"></span></div>`
+  $('logBody').innerHTML = banner +
+    `<div style="margin-bottom:8px">${actionBtn}<span id="loggingResult" style="margin-left:8px"></span></div>`
     + `<div class="log-files">${files || '<span style="color:var(--text-dim)">no files</span>'}</div>`
     + `<div class="log-tail">${tail || '<span style="color:var(--text-dim)">empty</span>'}</div>`;
 }
-// Logging enable/disable via the /admin/logging sidecar (Phase 4 §2.1).
+// Logging enable/disable via the /admin/logging sidecar (Phase 4 §2.1; Phase 4.6
+// pending-state UX). Each click overwrites the sidecar; the banner + button
+// re-render so the operator can stack changes and restart once.
 function enableLogging() { loggingAction({ action: 'enable' }); }
 function disableLogging() {
   if (confirm('Disable file logging? Existing log files are kept; new entries stop after the next restart.')) loggingAction({ action: 'disable' });
 }
 async function loggingAction(body) {
-  const out = $('loggingResult');
   try {
     const d = await fetch('/admin/logging', {
       method: 'POST', headers: { ...HEADERS, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-    const msg = body.action === 'enable'
-      ? ('Logging will write to ' + escHtml(d.log_dir || '') + '. Restart the server to apply.')
-      : 'Logging disabled. Restart the server to apply.';
-    if (out) out.innerHTML = `<span style="color:var(--amber);font-size:12px">${msg}</span>`;
+    // Re-render so the pending banner + action button reflect the new on-disk
+    // sidecar (the last write before a restart is what applies).
+    await loadLogs();
+    const out = $('loggingResult');
+    if (out) {
+      const msg = body.action === 'enable'
+        ? ('Logging will write to ' + escHtml(d.log_dir || '') + '. Restart to apply.')
+        : 'Logging will be disabled. Restart to apply.';
+      out.innerHTML = `<span style="color:var(--amber);font-size:12px">${msg}</span>`;
+    }
   } catch (e) {
+    const out = $('loggingResult');
     if (out) out.innerHTML = `<span style="color:var(--danger);font-size:12px">Action failed (${e && e.message}).</span>`;
   }
 }
