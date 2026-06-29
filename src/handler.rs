@@ -119,7 +119,17 @@ async fn handle_list_tools(state: &AppState, id: Option<Value>) -> Response {
     let ctx = RequestContext::new(NumberOrString::Number(0), state.peer.clone());
     match state.server.list_tools(None, ctx).await {
         Ok(result) => match serde_json::to_value(result) {
-            Ok(v) => json_rpc_response(id, v),
+            Ok(v) => {
+                // Analytics (Phase 2): measure the result payload — what the LLM
+                // pays to register the tools — not the JSON-RPC envelope.
+                let result_bytes = v.to_string().len();
+                state
+                    .server
+                    .shared()
+                    .analytics
+                    .record_presentation(result_bytes);
+                json_rpc_response(id, v)
+            }
             Err(e) => json_rpc_error(id, -32603, &format!("internal error: {e}")),
         },
         Err(e) => json_rpc_error(id, e.code.0 as i64, e.message.as_ref()),
@@ -132,13 +142,77 @@ async fn handle_call_tool(state: &AppState, id: Option<Value>, params: Value) ->
         Ok(p) => p,
         Err(e) => return json_rpc_error(id, -32602, &format!("Invalid params: {e}")),
     };
+
+    // Capture analytics metadata BEFORE `call_params` is consumed by `call_tool`
+    // (Phase 2). The full path is used for repo aggregation — this is the
+    // operator-only analytics pipeline, distinct from the redacted `/events`.
+    let tool_name = call_params.name.to_string();
+    // Repo attribution looks at the first present path-like arg: `path`, then
+    // `source`/`destination` (copy/move/stream), then the first of `paths`
+    // (read_multiple_files) — otherwise these land in the "(no repo / system)"
+    // bucket.
+    let tool_path = call_params.arguments.as_ref().and_then(|a| {
+        ["path", "source", "destination"]
+            .iter()
+            .find_map(|k| a.get(*k).and_then(|v| v.as_str()))
+            .or_else(|| {
+                a.get("paths")
+                    .and_then(|v| v.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| s.to_string())
+    });
+    let start = std::time::Instant::now();
+
     let ctx = RequestContext::new(NumberOrString::Number(0), state.peer.clone());
-    match state.server.call_tool(call_params, ctx).await {
+    let outcome = state.server.call_tool(call_params, ctx).await;
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match outcome {
         Ok(result) => match serde_json::to_value(result) {
-            Ok(v) => json_rpc_response(id, v),
+            Ok(v) => {
+                // Measure the serialized response, then record analytics. The JSONL
+                // append is blocking I/O, so it runs in `block_in_place` (HTTP mode
+                // is multi-threaded). Counter updates are cheap; no stdio concern —
+                // the stdio path never reaches this handler.
+                let response_bytes = v.to_string().len();
+                let shared = state.server.shared().clone();
+                let repo = tool_path
+                    .as_deref()
+                    .and_then(|p| shared.analytics.repo_for(p));
+                let entry = crate::analytics::ToolCallEntry::new(
+                    &tool_name,
+                    duration_ms,
+                    response_bytes,
+                    "ok",
+                    tool_path,
+                    repo,
+                );
+                tokio::task::block_in_place(move || shared.analytics.record_tool_call(entry));
+                json_rpc_response(id, v)
+            }
             Err(e) => json_rpc_error(id, -32603, &format!("internal error: {e}")),
         },
-        Err(e) => json_rpc_error(id, e.code.0 as i64, e.message.as_ref()),
+        Err(e) => {
+            // Record protocol-level failures too (e.g. not-enabled / at-capacity),
+            // with the JSON-RPC error message length as the response size.
+            let response_bytes = e.message.len();
+            let shared = state.server.shared().clone();
+            let repo = tool_path
+                .as_deref()
+                .and_then(|p| shared.analytics.repo_for(p));
+            let entry = crate::analytics::ToolCallEntry::new(
+                &tool_name,
+                duration_ms,
+                response_bytes,
+                "error",
+                tool_path,
+                repo,
+            );
+            tokio::task::block_in_place(move || shared.analytics.record_tool_call(entry));
+            json_rpc_error(id, e.code.0 as i64, e.message.as_ref())
+        }
     }
 }
 

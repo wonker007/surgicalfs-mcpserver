@@ -4,149 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SurgicalFS — Control Plane</title>
-<style>
-:root {
-  --bg: #ffffff;
-  --bg-surface: #f6f8fa;
-  --bg-code: #f0f2f5;
-  --border: #d1d5db;
-  --border-light: #e5e7eb;
-  --text: #1f2937;
-  --text-muted: #6b7280;
-  --text-dim: #9ca3af;
-  --accent: #0d9488;
-  --accent-light: #ccfbf1;
-  --accent-border: #14b8a6;
-  --danger: #dc2626;
-  --green: #16a34a;
-  --amber: #d97706;
-  --shadow: 0 1px 3px rgba(0,0,0,0.08);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
-}
-[data-theme="dark"] {
-  --bg: #0f1117;
-  --bg-surface: #1a1d27;
-  --bg-code: #1e2130;
-  --border: #2d3140;
-  --border-light: #252836;
-  --text: #e5e7eb;
-  --text-muted: #9ca3af;
-  --text-dim: #6b7280;
-  --accent: #2dd4bf;
-  --accent-light: #0d3d38;
-  --accent-border: #14b8a6;
-  --danger: #f87171;
-  --green: #22c55e;
-  --amber: #fbbf24;
-  --shadow: 0 1px 3px rgba(0,0,0,0.3);
-}
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: var(--font-sans); background: var(--bg); color: var(--text); line-height: 1.5; }
-.container { max-width: 1100px; margin: 0 auto; padding: 0 24px 80px; }
-
-/* Header */
-.header {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 20px 0 16px; border-bottom: 1px solid var(--border-light); margin-bottom: 8px;
-}
-.header-left { display: flex; align-items: baseline; gap: 12px; }
-.header-left h1 { font-family: var(--font-mono); font-size: 22px; font-weight: 700; }
-.header-left .subtitle { color: var(--text-muted); font-size: 14px; }
-.header-right { display: flex; align-items: center; gap: 12px; }
-.version-badge {
-  font-family: var(--font-mono); font-size: 12px; padding: 2px 8px;
-  border: 1px solid var(--border); border-radius: 4px; color: var(--text-muted);
-}
-.status-pill {
-  display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-.status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--text-dim); }
-.status-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.status-dot.down { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
-.theme-toggle {
-  background: none; border: 1px solid var(--border); border-radius: 6px;
-  padding: 6px 9px; cursor: pointer; color: var(--text-muted); font-size: 15px;
-}
-.theme-toggle:hover { border-color: var(--accent); }
-
-.section { margin-top: 28px; }
-.section-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; color: var(--text); }
-
-/* Metric cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-.card {
-  border: 1px solid var(--border-light); border-radius: 8px; padding: 14px 16px;
-  background: var(--bg-surface); box-shadow: var(--shadow);
-}
-.card .label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
-.card .value { font-family: var(--font-mono); font-size: 26px; font-weight: 600; margin-top: 4px; }
-.card .value.small { font-size: 18px; }
-.card .sub { font-size: 12px; color: var(--text-dim); font-family: var(--font-mono); margin-top: 2px; }
-.value.alert { color: var(--danger); }
-
-/* Latency bars */
-.lat-grid { display: flex; flex-direction: column; gap: 6px; }
-.lat-row { display: grid; grid-template-columns: 70px 1fr 60px; align-items: center; gap: 10px; font-size: 12px; font-family: var(--font-mono); }
-.lat-row .lat-label { color: var(--text-muted); text-align: right; }
-.lat-bar-track { height: 14px; background: var(--bg-code); border-radius: 3px; overflow: hidden; }
-.lat-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; transition: width 200ms; min-width: 0; }
-.lat-row .lat-count { color: var(--text-dim); }
-
-/* Tool inventory */
-.cat {
-  border: 1px solid var(--border-light); border-radius: 6px; margin-bottom: 8px; overflow: hidden;
-}
-.cat-head {
-  display: flex; align-items: center; gap: 12px; padding: 10px 14px; cursor: pointer; user-select: none;
-}
-.cat-head:hover { background: var(--bg-surface); }
-.cat-head .chev { color: var(--text-dim); font-size: 11px; transition: transform 150ms; width: 12px; }
-.cat-head .chev.open { transform: rotate(90deg); }
-.cat-head .cat-name { font-family: var(--font-mono); font-size: 14px; font-weight: 500; flex: 1; }
-.cat-head .cat-count { font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
-.cat-body { display: none; padding: 6px 14px 12px 38px; background: var(--bg-surface); }
-.cat-body.open { display: block; }
-.tool { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
-.tool .dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
-.tool .dot.on { background: var(--green); }
-.tool .dot.off { background: var(--text-dim); }
-.tool .tname { font-family: var(--font-mono); color: var(--text); }
-.tool.disabled .tname { color: var(--text-dim); text-decoration: line-through; }
-.cat-toggle {
-  font-family: var(--font-sans); font-size: 12px; padding: 3px 11px;
-  background: var(--bg); color: var(--accent); border: 1px solid var(--border);
-  border-radius: 4px; cursor: pointer; flex-shrink: 0;
-}
-.cat-toggle:hover:not(:disabled) { border-color: var(--accent); }
-.cat-toggle:disabled { opacity: 0.4; cursor: not-allowed; }
-.ro-badge {
-  font-size: 11px; padding: 1px 7px; border-radius: 4px; margin-left: 8px;
-  background: var(--amber); color: #fff; font-family: var(--font-sans); font-weight: 600;
-}
-
-/* Activity feed */
-.feed { border: 1px solid var(--border-light); border-radius: 8px; overflow: hidden; }
-.feed-empty { padding: 24px; text-align: center; color: var(--text-dim); font-size: 13px; }
-.feed-row {
-  display: grid; grid-template-columns: 78px 150px 1fr 70px 54px; gap: 10px; align-items: center;
-  padding: 7px 14px; border-bottom: 1px solid var(--border-light); font-size: 12.5px; font-family: var(--font-mono);
-}
-.feed-row:last-child { border-bottom: none; }
-.feed-row .ts { color: var(--text-dim); }
-.feed-row .tool { color: var(--accent); }
-.feed-row .args { color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.feed-row .dur { color: var(--text-muted); text-align: right; }
-.feed-row .st { text-align: center; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
-.feed-row .st.ok { color: var(--green); }
-.feed-row .st.error { color: var(--danger); }
-
-.footer {
-  margin-top: 40px; padding-top: 14px; border-top: 1px solid var(--border-light);
-  font-size: 12px; color: var(--text-dim); display: flex; gap: 16px; font-family: var(--font-mono);
-}
-</style>
+<link rel="stylesheet" href="/dashboard.css">
 </head>
 <body>
 <div class="container">
@@ -158,271 +16,181 @@ body { font-family: var(--font-sans); background: var(--bg); color: var(--text);
     </div>
     <div class="header-right">
       <span class="status-pill"><span class="status-dot" id="statusDot"></span><span id="statusText">connecting…</span></span>
+      <button class="srv-btn" id="btnRestart" onclick="confirmServerAction('restart')" title="Restart the server (Shawl auto-restarts)">Restart</button>
+      <button class="srv-btn danger" id="btnStop" onclick="confirmServerAction('stop')" title="Stop the server (manual restart required)">Stop</button>
+      <select class="mini-select" id="refreshSelect" title="Auto-refresh interval" onchange="setRefreshInterval(this.value)">
+        <option value="1000">1s</option>
+        <option value="5000" selected>5s</option>
+        <option value="15000">15s</option>
+        <option value="30000">30s</option>
+      </select>
       <span class="version-badge" id="versionBadge">v—</span>
       <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle dark mode" id="themeBtn">&#9790;</button>
     </div>
   </div>
-
+  <!-- Stale-token banner: shown when polls 401 (server rebooted → new token) -->
+  <div class="banner warn" id="staleToken" style="display:none">
+    <span>Server restarted. The control token has changed. Please refresh the page to reconnect.</span>
+    <button class="srv-btn" style="margin-left:auto" onclick="location.reload()">Refresh</button>
+  </div>
+  <!-- Recovery panel: shown after a Stop, or after 3 consecutive poll failures -->
+  <div class="recovery" id="recoveryPanel" style="display:none">
+    <details open>
+      <summary id="recoverySummary">Server is not running</summary>
+      <div class="recovery-body">
+        To restart manually:
+        <ul>
+          <li>Open PowerShell as Administrator</li>
+          <li>Run: <code>sc.exe start SurgicalFS-MCP</code></li>
+          <li>Or: <code>net start SurgicalFS-MCP</code></li>
+        </ul>
+        To check service status:
+        <ul>
+          <li>Run: <code>sc.exe query SurgicalFS-MCP</code></li>
+        </ul>
+        After the server starts, refresh this page to reconnect.<br>
+        The control token changes on each boot, so a page refresh is required.
+        <div id="recoveryLog" style="margin-top:8px"></div>
+      </div>
+    </details>
+  </div>
   <!-- Status / process cards -->
   <div class="section">
     <div class="section-title">Overview</div>
     <div class="cards">
       <div class="card"><div class="label">Uptime</div><div class="value small" id="mUptime">—</div></div>
-      <div class="card"><div class="label">Requests</div><div class="value" id="mRequests">—</div></div>
-      <div class="card"><div class="label">Errors</div><div class="value" id="mErrors">—</div></div>
+      <div class="card"><div class="label">Requests</div><div class="value" id="mRequests">—</div><div id="sparkRequests"></div></div>
+      <div class="card"><div class="label">Errors</div><div class="value" id="mErrors">—</div><div id="sparkErrors"></div></div>
+      <div class="card"><div class="label">Error Rate</div><div class="value" id="mErrRate">—</div><div class="sub" id="mErrRateSub"></div></div>
       <div class="card"><div class="label">In-flight</div><div class="value" id="mInflight">—</div><div class="sub" id="mInflightSub"></div></div>
-      <div class="card"><div class="label">Avg latency</div><div class="value small" id="mAvgLat">—</div></div>
-      <div class="card"><div class="label">RSS</div><div class="value small" id="mRss">—</div></div>
+      <div class="card"><div class="label">Avg latency</div><div class="value small" id="mAvgLat">—</div><div id="sparkLat"></div></div>
+      <div class="card"><div class="label">RSS</div><div class="value small" id="mRss">—</div><div id="sparkRss"></div></div>
       <div class="card"><div class="label">Handles</div><div class="value small" id="mHandles">—</div></div>
       <div class="card"><div class="label">PID</div><div class="value small" id="mPid">—</div></div>
     </div>
   </div>
-
-  <!-- Latency distribution -->
+  <!-- Latency distribution (vertical histogram, Phase 3.5) -->
   <div class="section">
-    <div class="section-title">Latency distribution</div>
-    <div class="lat-grid" id="latGrid"></div>
+    <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>Latency Distribution</span>
+      <span id="histSub" style="color:var(--text-dim);font-weight:400;font-size:12px"></span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <select class="mini-select" id="histRecent" title="Recent window" onchange="renderHistogram()">
+          <option value="0" selected>Session</option>
+          <option value="5">5m</option>
+          <option value="15">15m</option>
+          <option value="30">30m</option>
+          <option value="60">1h</option>
+        </select>
+        <select class="mini-select" id="histCompare" title="Comparison" onchange="onHistCompareChange()">
+          <option value="none" selected>None</option>
+          <option value="24h">24h</option>
+          <option value="7d">7d</option>
+          <option value="both">24h + 7d</option>
+        </select>
+      </span>
+    </div>
+    <div class="hist-container"><div id="histChart"></div></div>
+    <div class="hist-legend" id="histLegend"></div>
   </div>
-
+  <!-- Analytics -->
+  <div class="section">
+    <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>Analytics</span>
+      <span id="anStatus" style="color:var(--text-dim);font-weight:400;font-size:12px">load to view</span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <button class="srv-btn" onclick="loadAnalytics()">Refresh</button>
+        <select class="mini-select" id="anExport" title="Download raw JSONL" onchange="exportAnalytics(this.value)">
+          <option value="">Export ▾</option>
+          <option value="today">Today</option>
+          <option value="week">Last 7 days</option>
+          <option value="month">Last 30 days</option>
+          <option value="all">All</option>
+        </select>
+      </span>
+    </div>
+    <div id="anBody"><div class="feed-empty">Loading analytics…</div></div>
+  </div>
+  <!-- Activity feed -->
+  <div class="section">
+    <div class="section-title" style="display:flex;align-items:center;gap:10px">
+      <span>Activity</span>
+      <span style="color:var(--text-dim);font-weight:400;font-size:12px">(live · redacted · newest first · last <span id="feedLimitLabel">100</span>)</span>
+      <select class="mini-select" id="feedLimit" title="Max feed entries" style="margin-left:auto" onchange="setFeedLimit(this.value)">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="250">250</option>
+        <option value="500">500</option>
+      </select>
+    </div>
+    <div class="feed" id="feed"><div class="feed-empty" id="feedEmpty">Waiting for tool calls…</div></div>
+  </div>
+  <!-- MCP Authentication (Phase 4.5: relocated below the Activity feed) -->
+  <div class="section" id="authPanel">
+    <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>MCP Authentication</span>
+      <span id="authWarnIcon" style="display:none;color:var(--amber)" title="MCP auth is disabled">&#9888;</span>
+      <span id="authStatus" style="color:var(--text-dim);font-weight:400;font-size:12px">—</span>
+    </div>
+    <div class="auth-box">
+      <div class="auth-warn">⚠ Claude.ai web connector does not support custom Authorization headers. This token works for Claude Desktop, Claude Code, and API clients.</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:10px 0">
+        <button class="srv-btn" onclick="authGenerate()">Generate New Token</button>
+        <button class="srv-btn" onclick="authSetPrompt()">Set Custom Token</button>
+        <button class="srv-btn danger" onclick="authClear()">Clear Token</button>
+      </div>
+      <div id="authResult"></div>
+      <div style="font-size:12px;color:var(--text-dim)">After changing the token, restart the server for it to take effect, then update your MCP client's Authorization header to match.</div>
+    </div>
+  </div>
   <!-- Tool inventory -->
   <div class="section">
     <div class="section-title">Tool inventory <span id="toolSummary" style="color:var(--text-muted);font-weight:400;font-size:13px"></span></div>
     <div id="tools"></div>
   </div>
-
-  <!-- Activity feed -->
+  <!-- Logs -->
   <div class="section">
-    <div class="section-title">Activity <span style="color:var(--text-dim);font-weight:400;font-size:12px">(live · redacted · newest first · last 100)</span></div>
-    <div class="feed" id="feed"><div class="feed-empty" id="feedEmpty">Waiting for tool calls…</div></div>
+    <div class="section-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>Logs</span>
+      <span id="logStatus" style="color:var(--text-dim);font-weight:400;font-size:12px">load to view</span>
+      <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+        <select class="mini-select" id="logLines" title="Tail lines" onchange="loadLogs()">
+          <option value="50">50</option>
+          <option value="100" selected>100</option>
+          <option value="200">200</option>
+        </select>
+        <button class="srv-btn" onclick="loadLogs()">Refresh</button>
+      </span>
+    </div>
+    <div id="logBody"><div class="feed-empty">Loading logs…</div></div>
   </div>
+  <!-- Connection trace (shown when [dashboard] tunnel_url is set) -->
+  <div class="conn-trace" id="connTrace" style="display:none"></div>
 
   <div class="footer">
     <span id="ftControlBind">control plane</span>
+    <span id="ftAuth"></span>
+    <span id="ftMode" style="display:none"></span>
     <span id="ftConfigSource"></span>
+  </div>
+  <!-- Confirmation modal (restart / stop) -->
+  <div class="modal-overlay" id="modalOverlay" style="display:none" onclick="if(event.target===this)closeModal()">
+    <div class="modal">
+      <div class="modal-title" id="modalTitle">Confirm</div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-actions">
+        <button class="srv-btn" onclick="closeModal()">Cancel</button>
+        <button class="srv-btn" id="modalConfirm">Confirm</button>
+      </div>
+    </div>
   </div>
 
 </div>
 
 <script>
-// The server template-injects the per-boot control token here before serving.
+// The per-boot control token, template-injected by the server before serving.
 const CTL_TOKEN = '__SURGICALFS_CTL_TOKEN__';
-const HEADERS = { 'Authorization': 'Bearer ' + CTL_TOKEN, 'X-SurgicalFS-Ctl': '1' };
-
-const LAT_BUCKETS = [
-  ['lt_1ms', '<1ms'], ['lt_10ms', '<10ms'], ['lt_50ms', '<50ms'], ['lt_100ms', '<100ms'],
-  ['lt_500ms', '<500ms'], ['lt_1s', '<1s'], ['lt_5s', '<5s'], ['gte_5s', '≥5s'],
-];
-const MAX_FEED = 100;
-let READ_ONLY = false; // set from /ready; disables toggle buttons when true
-
-// ── Theme (no localStorage / sessionStorage; system preference + manual) ──
-function setTheme(t) {
-  document.documentElement.setAttribute('data-theme', t);
-  document.getElementById('themeBtn').innerHTML = t === 'dark' ? '&#9728;' : '&#9790;';
-}
-function toggleTheme() {
-  const cur = document.documentElement.getAttribute('data-theme');
-  setTheme(cur === 'dark' ? 'light' : 'dark');
-}
-setTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-
-// ── Helpers ──
-function $(id) { return document.getElementById(id); }
-function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function fmtBytes(b) {
-  if (b == null) return '—';
-  if (b < 1024) return b + ' B';
-  if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-  return (b / 1048576).toFixed(1) + ' MB';
-}
-function fmtUptime(s) {
-  if (s == null) return '—';
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (d) return `${d}d ${h}h ${m}m`;
-  if (h) return `${h}h ${m}m ${sec}s`;
-  if (m) return `${m}m ${sec}s`;
-  return `${sec}s`;
-}
-function nowHms() {
-  const d = new Date();
-  const p = n => String(n).padStart(2, '0');
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
-}
-
-// ── Status ──
-function setStatus(ok) {
-  const dot = $('statusDot'), txt = $('statusText');
-  dot.className = 'status-dot ' + (ok ? 'ok' : 'down');
-  txt.textContent = ok ? 'connected' : 'unreachable';
-}
-
-// ── Health + metrics polling ──
-async function poll() {
-  try {
-    const [health, metrics] = await Promise.all([
-      fetch('/health', { headers: HEADERS }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
-      fetch('/metrics', { headers: HEADERS }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
-    ]);
-    renderHealth(health);
-    renderMetrics(metrics);
-    setStatus(true);
-  } catch (e) {
-    setStatus(false);
-  }
-}
-
-function renderHealth(h) {
-  $('versionBadge').textContent = 'v' + (h.version || '—');
-  $('mUptime').textContent = fmtUptime(h.uptime_secs);
-  $('mPid').textContent = h.pid != null ? h.pid : '—';
-  if (h.rss_bytes != null) $('mRss').textContent = fmtBytes(h.rss_bytes);
-  if (h.handle_count != null) $('mHandles').textContent = h.handle_count;
-}
-
-function renderMetrics(m) {
-  const req = m.requests || {}, lat = m.latency || {}, proc = m.process || {};
-  $('mRequests').textContent = req.total != null ? req.total : '—';
-  const errEl = $('mErrors');
-  errEl.textContent = req.errors != null ? req.errors : '—';
-  errEl.className = 'value' + (req.errors > 0 ? ' alert' : '');
-  $('mInflight').textContent = req.in_flight != null ? req.in_flight : '—';
-  $('mInflightSub').textContent = req.max_concurrent != null ? ('max ' + req.max_concurrent) : '';
-  // Avg latency = sum_us / total.
-  if (lat.sum_us != null && req.total) {
-    const avgUs = lat.sum_us / req.total;
-    $('mAvgLat').textContent = avgUs >= 1000 ? (avgUs / 1000).toFixed(1) + ' ms' : Math.round(avgUs) + ' µs';
-  } else {
-    $('mAvgLat').textContent = '0 µs';
-  }
-  if (proc.rss_bytes != null) $('mRss').textContent = fmtBytes(proc.rss_bytes);
-  if (proc.handle_count != null) $('mHandles').textContent = proc.handle_count;
-  renderLatency(lat.buckets || {});
-}
-
-function renderLatency(buckets) {
-  const counts = LAT_BUCKETS.map(([k]) => buckets[k] || 0);
-  const max = Math.max(1, ...counts);
-  $('latGrid').innerHTML = LAT_BUCKETS.map(([k, label], i) => {
-    const c = counts[i];
-    const pct = (c / max * 100).toFixed(1);
-    return `<div class="lat-row">
-      <span class="lat-label">${label}</span>
-      <span class="lat-bar-track"><span class="lat-bar-fill" style="width:${pct}%"></span></span>
-      <span class="lat-count">${c}</span>
-    </div>`;
-  }).join('');
-}
-
-// ── Tool inventory ──
-async function loadTools() {
-  try {
-    const data = await fetch('/admin/tools', { headers: HEADERS }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-    renderTools(data);
-  } catch (e) { /* leave previous render */ }
-}
-function renderTools(data) {
-  const roBadge = READ_ONLY ? ' <span class="ro-badge">read-only</span>' : '';
-  $('toolSummary').innerHTML = `· ${data.enabled_count}/${data.total_count} enabled${roBadge}`;
-  $('tools').innerHTML = (data.categories || []).map((cat, idx) => {
-    const tools = (cat.tools || []).map(t => `
-      <div class="tool ${t.enabled ? '' : 'disabled'}">
-        <span class="dot ${t.enabled ? 'on' : 'off'}"></span>
-        <span class="tname">${escHtml(t.name)}</span>
-      </div>`).join('');
-    // Category names come from a fixed server-side allowlist (no special chars),
-    // so they are safe to inline into the onclick handler.
-    const fullyEnabled = cat.enabled_count === cat.total_count;
-    const label = fullyEnabled ? 'Disable' : 'Enable';
-    const btn = `<button class="cat-toggle" ${READ_ONLY ? 'disabled title="Read-only mode"' : ''}` +
-      ` onclick="toggleCategory(event, '${cat.category}', ${fullyEnabled})">${label}</button>`;
-    return `<div class="cat">
-      <div class="cat-head" onclick="toggleCat(${idx})">
-        <span class="chev" id="chev-${idx}">&#9654;</span>
-        <span class="cat-name">${escHtml(cat.category)}</span>
-        <span class="cat-count">${cat.enabled_count}/${cat.total_count}</span>
-        ${btn}
-      </div>
-      <div class="cat-body" id="catbody-${idx}">${tools}</div>
-    </div>`;
-  }).join('');
-}
-function toggleCat(idx) {
-  $('catbody-' + idx).classList.toggle('open');
-  $('chev-' + idx).classList.toggle('open');
-}
-async function toggleCategory(ev, category, fullyEnabled) {
-  ev.stopPropagation(); // don't also expand/collapse the card
-  if (READ_ONLY) return;
-  try {
-    await fetch('/admin/tools', {
-      method: 'POST',
-      headers: { ...HEADERS, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: fullyEnabled ? 'disable' : 'enable', targets: [category] }),
-    }).then(r => { if (!r.ok) throw new Error(r.status); return r.json(); });
-    loadTools(); // refresh the panel immediately (SSE will also fire)
-  } catch (e) { /* ignore — the next SSE event / poll reconciles */ }
-}
-
-// ── Activity feed (SSE) ──
-function addActivity(ev) {
-  const feed = $('feed');
-  const empty = $('feedEmpty');
-  if (empty) empty.remove();
-  const row = document.createElement('div');
-  row.className = 'feed-row';
-  const st = ev.status === 'ok' ? 'ok' : 'error';
-  row.innerHTML =
-    `<span class="ts">${nowHms()}</span>` +
-    `<span class="tool">${escHtml(ev.tool || '?')}</span>` +
-    `<span class="args" title="${escHtml(ev.args_summary || '')}">${escHtml(ev.args_summary || '')}</span>` +
-    `<span class="dur">${ev.duration_ms != null ? ev.duration_ms + 'ms' : ''}</span>` +
-    `<span class="st ${st}">${st}</span>`;
-  feed.insertBefore(row, feed.firstChild);
-  while (feed.children.length > MAX_FEED) feed.removeChild(feed.lastChild);
-}
-
-function startEvents() {
-  // EventSource cannot send custom headers, so the token rides the query string
-  // (localhost-only; the token is URL-safe so encoding is a no-op). The browser
-  // auto-reconnects on error.
-  const es = new EventSource('/events?token=' + encodeURIComponent(CTL_TOKEN));
-  es.addEventListener('tool_call', e => {
-    try { addActivity(JSON.parse(e.data)); } catch (_) {}
-  });
-  es.addEventListener('health', e => {
-    try {
-      const h = JSON.parse(e.data);
-      if (h.in_flight != null) $('mInflight').textContent = h.in_flight;
-      if (h.rss_bytes != null) $('mRss').textContent = fmtBytes(h.rss_bytes);
-      if (h.handle_count != null) $('mHandles').textContent = h.handle_count;
-    } catch (_) {}
-  });
-  es.addEventListener('tool_toggle', () => {
-    // A toggle happened (possibly from another operator) — re-fetch inventory.
-    loadTools();
-  });
-}
-
-// ── /ready (one-shot: footer context + read-only state) ──
-async function loadReady() {
-  try {
-    const r = await fetch('/ready', { headers: HEADERS }).then(r => r.json());
-    READ_ONLY = !!r.read_only;
-    $('ftControlBind').textContent = 'control: ' + (r.control_bind || '') + ' · mcp: ' + (r.mcp_bind || '');
-    $('ftConfigSource').textContent = r.config_source ? ('config: ' + r.config_source) : 'config: (directory args)';
-  } catch (e) {
-  } finally {
-    // Render the tool panel once READ_ONLY is known (so toggle buttons reflect it).
-    loadTools();
-  }
-}
-
-// ── Init ──
-poll();
-loadReady(); // sets READ_ONLY, then loads the tool inventory
-startEvents();
-setInterval(poll, 5000);
-setInterval(loadTools, 30000);
 </script>
+<script src="/dashboard.js"></script>
 </body>
 </html>

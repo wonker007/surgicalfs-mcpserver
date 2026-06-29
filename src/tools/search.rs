@@ -324,6 +324,8 @@ mod tests {
             runtime: Default::default(),
             server: Default::default(),
             logging: Default::default(),
+            analytics: Default::default(),
+            dashboard: Default::default(),
         }
     }
 

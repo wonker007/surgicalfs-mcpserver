@@ -3,6 +3,7 @@
 // inline in `handler::mcp_handler` to avoid an axum `State`-type conflict. The
 // module-level allow keeps it compiled (per the prompt's "keep auth.rs") without
 // tripping `clippy -D warnings` on the now-unused fn.
+mod analytics;
 #[allow(dead_code)]
 mod auth;
 mod config;
@@ -106,6 +107,29 @@ async fn main() -> Result<()> {
         cfg.runtime.idle_timeout_secs = secs;
     }
 
+    // Logging sidecar (Phase 4): `surgicalfs-logging.json` next to the config
+    // overrides `[logging] log_dir`/`retention_days`, letting the dashboard
+    // enable/disable file logging without rewriting the TOML. It MUST be read
+    // before `setup_logging` (tracing-appender needs the final `log_dir`). The
+    // chosen source is logged after the subscriber is up.
+    let mut analytics_source = "config";
+    let logging_source =
+        match state::read_logging_sidecar(&state::logging_sidecar_path(loaded_path.as_deref())) {
+            Some(sc) => {
+                cfg.logging.log_dir = sc.log_dir;
+                cfg.logging.retention_days = sc.retention_days;
+                // Phase 4.5: the same sidecar also overrides analytics logging, so
+                // the dashboard's single toggle enables BOTH subsystems.
+                if !sc.analytics_log_dir.is_empty() {
+                    cfg.analytics.log_dir = sc.analytics_log_dir;
+                    cfg.analytics.retention_days = sc.analytics_retention_days;
+                    analytics_source = "sidecar";
+                }
+                "sidecar"
+            }
+            None => "config",
+        };
+
     // Initialize logging: stderr always (stdout reserved for MCP JSON-RPC), plus
     // a rolling daily JSON file when `[logging] log_dir` is set. The guard MUST
     // live for the whole process (dropping it stops the background writer and
@@ -114,6 +138,22 @@ async fn main() -> Result<()> {
 
     tracing::info!("SurgicalFS MCP server starting...");
     tracing::info!("Loaded {config_source}");
+    tracing::info!(
+        "Logging config from {logging_source} ({})",
+        if cfg.logging.log_dir.is_empty() {
+            "stderr only".to_string()
+        } else {
+            format!("file logging → {}", cfg.logging.log_dir)
+        }
+    );
+    tracing::info!(
+        "Analytics config from {analytics_source} ({})",
+        if cfg.analytics.log_dir.is_empty() {
+            "disabled".to_string()
+        } else {
+            format!("JSONL → {}", cfg.analytics.log_dir)
+        }
+    );
     tracing::info!(
         "Allowed directories: {:?}",
         cfg.security.allowed_directories
@@ -136,6 +176,8 @@ async fn main() -> Result<()> {
     .map_err(|e| anyhow::anyhow!("{}", e.0.message))?;
 
     match transport.as_str() {
+        // stdio path is UNCHANGED: it returns `Result<()>` and `main` exits
+        // naturally on return (the WorkerGuard drops at end of `main` and flushes).
         "stdio" => run_stdio(cfg, path_guard).await,
         "http" => {
             // The idle self-reap is a stdio-only mechanism. In HTTP mode a
@@ -150,7 +192,13 @@ async fn main() -> Result<()> {
                 );
                 cfg.runtime.idle_timeout_secs = 0;
             }
-            run_http(cfg, path_guard, bind, loaded_path).await
+            // `run_http` returns the desired exit code (1 = restart → Shawl
+            // restarts; 0 otherwise). Drop the logging WorkerGuard FIRST — it
+            // flushes the rolling-file writer — because `std::process::exit` runs
+            // no destructors. With stderr-only logging the guard is `None` (no-op).
+            let exit_code = run_http(cfg, path_guard, bind, loaded_path).await?;
+            drop(_log_guard);
+            std::process::exit(exit_code);
         }
         other => anyhow::bail!(
             "Unknown transport '{}'. Valid values: \"stdio\" or \"http\".",
@@ -255,12 +303,16 @@ async fn run_stdio(cfg: config::Config, path_guard: pathguard::PathGuard) -> Res
 /// The stateless handler answers each POST with buffered `application/json` — no
 /// SSE, no sessions — while reusing the full tool-dispatch chain via the server's
 /// existing `ServerHandler` methods. See `docs/reports/custom-http-handler-feasibility.md`.
+/// Returns the desired process exit code (`1` for a `Restart` request so Shawl
+/// restarts the service, `0` otherwise). The caller (`main`) drops the logging
+/// guard to flush the rolling-file writer BEFORE calling `std::process::exit`,
+/// since `process::exit` runs no destructors.
 async fn run_http(
     cfg: config::Config,
     path_guard: pathguard::PathGuard,
     bind: String,
     config_path: Option<PathBuf>,
-) -> Result<()> {
+) -> Result<i32> {
     use axum::extract::DefaultBodyLimit;
     use axum::routing::{get, post};
     use axum::Router;
@@ -283,10 +335,22 @@ async fn run_http(
         ctl_token_path.display()
     );
 
+    // Dual-shutdown watch channel, created up-front (before `SharedState`) so the
+    // Sender can be handed to `SharedState`: the control plane's `POST /admin/server`
+    // route uses it to trigger a graceful shutdown with a reason, and the exit code
+    // read after both listeners join distinguishes restart (exit 1 → Shawl restarts)
+    // from stop / Ctrl+C (exit 0 → no restart). `None` = running.
+    let (shutdown_tx, _) = tokio::sync::watch::channel(None::<shared::ShutdownReason>);
+
     // SharedState is created BEFORE the server so the server, the process
     // metrics sampler, and the control plane observe one instance (DEC-DRAFT-L).
-    // The config source path feeds the control plane's `/ready` `config_source`.
-    let shared = std::sync::Arc::new(shared::SharedState::new(&cfg, config_path));
+    // The config source path feeds the control plane's `/ready` `config_source`;
+    // the shutdown Sender lets `/admin/server` request a graceful exit.
+    let shared = std::sync::Arc::new(shared::SharedState::new(
+        &cfg,
+        config_path,
+        Some(shutdown_tx.clone()),
+    ));
 
     // Process metrics sampler (HTTP mode only): refreshes RSS + handle count
     // every 10s into `shared.metrics`, and bridges each sample onto the SSE bus
@@ -307,23 +371,57 @@ async fn run_http(
     // files older than its age threshold, so it never races an in-flight write.
     {
         let dirs = cfg.security.allowed_directories.clone();
+        // Analytics retention (Phase 2) + tracing-log retention (Phase 3): delete
+        // files older than each `retention_days`, on the same 5-minute cadence +
+        // once at startup.
+        let analytics_dir = cfg.analytics.log_dir.clone();
+        let analytics_retention = cfg.analytics.retention_days;
+        let log_dir = cfg.logging.log_dir.clone();
+        let log_retention = cfg.logging.retention_days;
         tokio::spawn(async move {
+            // One retention pass over both the analytics JSONL dir and the tracing
+            // log dir. Cheap directory scans; run on the blocking pool.
+            let retention_pass = {
+                let analytics_dir = analytics_dir.clone();
+                let log_dir = log_dir.clone();
+                move || {
+                    if !analytics_dir.is_empty() {
+                        analytics::cleanup_old_analytics_files(
+                            std::path::Path::new(&analytics_dir),
+                            analytics_retention,
+                        );
+                    }
+                    lifecycle::cleanup_old_log_files(&log_dir, log_retention);
+                }
+            };
+            // Startup pass.
+            let _ = tokio::task::spawn_blocking(retention_pass.clone()).await;
             loop {
                 let d = dirs.clone();
                 let _ = tokio::task::spawn_blocking(move || lifecycle::sweep_tmp_files(&d)).await;
+                let _ = tokio::task::spawn_blocking(retention_pass.clone()).await;
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             }
         });
     }
 
-    let auth_token = cfg.server.auth_token.clone();
+    // MCP auth token: the `surgicalfs-auth.token` sidecar OVERRIDES the TOML
+    // `[server] auth_token` if present (Phase 3). Present+non-empty → that token;
+    // present+empty → disabled; absent → the TOML default. `config_source` was
+    // threaded into the snapshot above, so reuse it to locate the sidecar.
+    let (auth_token, auth_src) = match state::read_auth_sidecar(&state::auth_sidecar_path(
+        shared.config_snapshot.config_source.as_deref(),
+    )) {
+        Some(t) => (t, "sidecar"),
+        None => (cfg.server.auth_token.clone(), "config"),
+    };
     if auth_token.is_empty() {
         tracing::warn!(
-            "[server] auth_token is empty: /mcp is UNAUTHENTICATED. Set a bearer token before any \
-             non-loopback exposure."
+            "MCP auth: DISABLED (from {auth_src}); /mcp is UNAUTHENTICATED. Set a bearer token \
+             before any non-loopback exposure."
         );
     } else {
-        tracing::info!("/mcp bearer authentication enabled.");
+        tracing::info!("MCP auth: bearer (from {auth_src})");
     }
 
     // Mint an inert `Peer<RoleServer>` once. No tool method reads it, but rmcp's
@@ -348,6 +446,14 @@ async fn run_http(
         path_guard,
         shared.clone(),
     ));
+
+    // Populate the control plane's tool-description map ONCE from the server's
+    // compiled `#[tool(description = …)]` metadata. `SharedState` is built before
+    // the server, so the descriptions can't be wired at construction; this is the
+    // single post-build write, after which the map is read-only. Covers ALL tools
+    // (enabled or not) for `GET /admin/tools`.
+    *shared.tool_descriptions.write().unwrap() = server.all_tool_descriptions();
+
     let app_state = handler::AppState {
         server,
         peer,
@@ -379,15 +485,17 @@ async fn run_http(
         .map_err(|e| anyhow::anyhow!("failed to bind control plane on {control_bind}: {e}"))?;
     tracing::info!("Control plane ready on http://{control_bind}/dashboard");
 
-    // Dual graceful shutdown: a single Ctrl+C fans out to both servers via a
-    // watch channel, so both drain together (STOP condition §13.6).
-    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    // Dual graceful shutdown: a single Ctrl+C fans out to both servers via the
+    // watch channel created up-front above, so both drain together (STOP condition
+    // §13.6). The control plane's `/admin/server` route can ALSO signal this same
+    // channel (with `Restart`/`Stop`); any `Some(reason)` is a change the listener
+    // subscribers below react to.
     {
         let tx = shutdown_tx.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             tracing::info!("Ctrl+C received, shutting down both listeners...");
-            let _ = tx.send(true);
+            let _ = tx.send(Some(shared::ShutdownReason::CtrlC));
         });
     }
 
@@ -439,7 +547,18 @@ async fn run_http(
         Err(e) => tracing::error!("Control server task panicked: {e}"),
     }
 
-    Ok(())
+    // Map the shutdown reason to a process exit code (DEC: restart vs stop). Shawl
+    // is installed with `--restart-if-not 0`, so exit 1 restarts the service and
+    // exit 0 does not. A `Restart` request → 1; `Stop`, `CtrlC`, or no reason → 0.
+    // The actual `process::exit` happens in `main` AFTER the logging guard is
+    // dropped, so this final diagnostic is flushed to the rolling log file.
+    let reason = *shutdown_tx.borrow();
+    let exit_code = match reason {
+        Some(shared::ShutdownReason::Restart) => 1,
+        _ => 0,
+    };
+    tracing::info!("Both listeners stopped (reason: {reason:?}); exiting with code {exit_code}.");
+    Ok(exit_code)
 }
 
 /// Unauthenticated health probe. Returns only non-sensitive process status

@@ -19,6 +19,10 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub logging: LoggingConfig,
+    #[serde(default)]
+    pub analytics: AnalyticsConfig,
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,13 +134,58 @@ pub struct LoggingConfig {
     #[serde(default)]
     pub log_dir: String,
 
-    /// Days to retain rotated log files (0 = unlimited). tracing-appender does
-    /// not auto-delete; retention/cleanup is a Stage 5 concern.
-    /// `allow(dead_code)`: parsed now so the `[logging]` schema is stable;
-    /// consumed once Stage 5 adds log cleanup.
+    /// Days to retain rotated log files (0 = unlimited). Wired in Phase 3: the
+    /// maintenance timer (`run_http`) deletes `surgicalfs.log.*` files older than
+    /// this on startup and every 5 minutes (`lifecycle::cleanup_old_log_files`).
     #[serde(default)]
-    #[allow(dead_code)]
     pub retention_days: u32,
+}
+
+/// Dashboard display settings (Phase 3). Informational only — does not affect
+/// routing or auth.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct DashboardConfig {
+    /// Public tunnel URL, shown in the dashboard connection trace. Empty = not
+    /// displayed.
+    #[serde(default)]
+    pub tunnel_url: String,
+}
+
+/// Analytics subsystem settings (Phase 2). All optional; the whole section
+/// defaults to "disabled" (`log_dir` empty), in which case only in-memory
+/// counters run and no JSONL files are written.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AnalyticsConfig {
+    /// Directory for daily JSONL analytics files. Empty = analytics logging
+    /// disabled. When set, daily files are `surgicalfs-analytics-YYYY-MM-DD.jsonl`.
+    #[serde(default)]
+    pub log_dir: String,
+
+    /// Days to retain analytics files. 0 = unlimited. Files older than this are
+    /// deleted on startup and daily by the maintenance timer.
+    #[serde(default = "default_analytics_retention")]
+    pub retention_days: u32,
+
+    /// Characters-per-token estimate for display. Default: 4.
+    #[serde(default = "default_chars_per_token")]
+    pub chars_per_token: f64,
+}
+
+impl Default for AnalyticsConfig {
+    fn default() -> Self {
+        Self {
+            log_dir: String::new(),
+            retention_days: default_analytics_retention(),
+            chars_per_token: default_chars_per_token(),
+        }
+    }
+}
+
+fn default_analytics_retention() -> u32 {
+    90
+}
+fn default_chars_per_token() -> f64 {
+    4.0
 }
 
 /// All valid tool category names.
@@ -386,6 +435,8 @@ impl Config {
             runtime: RuntimeConfig::default(),
             server: ServerConfig::default(),
             logging: LoggingConfig::default(),
+            analytics: AnalyticsConfig::default(),
+            dashboard: DashboardConfig::default(),
         })
     }
 
@@ -505,5 +556,30 @@ max_concurrent_requests = 5
         assert_eq!(config.server.max_concurrent_requests, 5);
         // A field omitted within a present [server] table still defaults.
         assert_eq!(config.server.control_bind, "127.0.0.1:9787");
+    }
+
+    #[test]
+    fn test_analytics_defaults_and_parse() {
+        // Absent section → disabled, default ratio and retention.
+        let c1: Config =
+            toml::from_str("[security]\nallowed_directories = [\"C:\\\\T\"]\n").unwrap();
+        assert!(c1.analytics.log_dir.is_empty());
+        assert_eq!(c1.analytics.retention_days, 90);
+        assert_eq!(c1.analytics.chars_per_token, 4.0);
+
+        // Present section parses.
+        let toml_str = r#"
+[security]
+allowed_directories = ["C:\\T"]
+
+[analytics]
+log_dir = "C:\\logs\\analytics"
+retention_days = 30
+chars_per_token = 3.5
+"#;
+        let c2: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(c2.analytics.log_dir, "C:\\logs\\analytics");
+        assert_eq!(c2.analytics.retention_days, 30);
+        assert_eq!(c2.analytics.chars_per_token, 3.5);
     }
 }

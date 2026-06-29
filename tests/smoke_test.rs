@@ -169,6 +169,8 @@ fn make_config(allowed: &Path) -> Config {
         runtime: Default::default(),
         server: Default::default(),
         logging: Default::default(),
+        analytics: Default::default(),
+        dashboard: Default::default(),
     }
 }
 

@@ -2,7 +2,7 @@
 
 High-performance, context-efficient filesystem MCP server built in Rust. Designed as a drop-in replacement for the default `@modelcontextprotocol/server-filesystem` — with surgical read/write operations, structured file format support, and aggressive context window optimization.
 
-**Version: 0.5.0** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
+**Version: 0.6.0** · **47 tools** · **Rust + rmcp SDK** · **Windows-first, cross-platform compatible**
 
 Works with any MCP-compatible client: Claude Desktop, Claude Code, Cursor, VS Code, Windsurf, Zed, ChatGPT (via remote MCP), Gemini, and more.
 
@@ -227,6 +227,22 @@ idle_timeout_secs = 0          # self-exit after N idle seconds (0 = never).
                                # remote supergateway deployments to reap orphaned
                                # children (see Remote access above). CLI override:
                                # surgicalfs-mcp --idle-timeout-secs 30
+
+[logging]                      # HTTP mode — structured rolling-JSON file logs
+log_dir = ""                   # directory for daily files (empty = stderr only).
+                               # Can also be toggled from the dashboard, which
+                               # writes a surgicalfs-logging.json override sidecar.
+retention_days = 0             # delete logs older than N days (0 = keep forever).
+                               # Now ACTIVE (was a placeholder before v0.6.0).
+
+[analytics]                    # HTTP mode — operator-only analytics (full paths)
+log_dir = ""                   # directory for daily JSONL files (empty = disabled,
+                               # in-memory session counters still run).
+retention_days = 90            # delete analytics files older than N days (0 = keep).
+chars_per_token = 4.0          # bytes→tokens estimate for the dashboard display.
+
+[dashboard]                    # HTTP mode — dashboard display (informational only)
+tunnel_url = ""                # public tunnel URL, shown in the connection trace.
 ```
 
 ---
@@ -274,17 +290,28 @@ See `surgicalfs.toml.example` for the full `[server]` configuration reference, i
 
 HTTP mode starts a second listener for operator monitoring and control (default `127.0.0.1:9787`, never exposed publicly):
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /dashboard` | Browser-based monitoring UI |
-| `GET /health` | Liveness: status, version, uptime, RSS, handle count |
-| `GET /ready` | Readiness: config source, directory reachability |
-| `GET /metrics` | Request counters, latency buckets, process metrics |
-| `GET /events` | SSE stream of tool calls and system events |
-| `GET /admin/tools` | Tool inventory by category with enabled/disabled status |
-| `POST /admin/tools` | Enable/disable tools at runtime (see below) |
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/dashboard` | GET | Browser-based monitoring and control UI |
+| `/dashboard.css` | GET | Dashboard stylesheet |
+| `/dashboard.js` | GET | Dashboard scripts |
+| `/health` | GET | Liveness: status, version, uptime, RSS, handles |
+| `/ready` | GET | Config snapshot, directory reachability, log/analytics dirs |
+| `/metrics` | GET | Request counters, latency buckets, process metrics |
+| `/events` | GET | SSE stream of tool calls and system events |
+| `/admin/tools` | GET | Tool inventory by category with descriptions |
+| `/admin/tools` | POST | Enable/disable tools at runtime |
+| `/admin/server` | POST | Restart or stop the server (Shawl integration) |
+| `/admin/auth` | GET | MCP auth token status and source |
+| `/admin/auth` | POST | Generate, set, or clear the MCP auth token |
+| `/admin/logging` | GET | File-logging status and source |
+| `/admin/logging` | POST | Enable or disable file logging (sidecar override) |
+| `/logs` | GET | Structured log file list + tail of current log |
+| `/logs/download` | GET | Download a specific log file |
+| `/analytics` | GET | Aggregated analytics (session/day/week/month rollups) |
+| `/analytics/export` | GET | Raw JSONL analytics download |
 
-The control plane authenticates with a per-boot token (auto-generated, written to `surgicalfs-ctl.token`). The dashboard handles this automatically.
+The control plane authenticates with a per-boot token (auto-generated, written to `surgicalfs-ctl.token`). `/dashboard`, `/dashboard.css`, and `/dashboard.js` are unauthenticated (the page is how the operator obtains the token); every other route requires the bearer token plus an `X-SurgicalFS-Ctl` header. The dashboard handles this automatically.
 
 ### Runtime tool toggle
 
@@ -499,9 +526,10 @@ src/
 ├── handler.rs           # Stateless HTTP handler (JSON-RPC dispatch)
 ├── shared.rs            # SharedState: tool set, metrics, activity, events
 ├── metrics.rs           # Lock-free counters, latency buckets, process sampler
-├── control.rs           # Control-plane routes, auth, SSE, dashboard
+├── control.rs           # Control-plane routes, auth, SSE, dashboard (HTML/CSS/JS served)
+├── analytics.rs         # Per-tool/per-repo analytics, JSONL audit log, rollups
 ├── redact.rs            # Positive-allowlist arg redaction for /events
-├── state.rs             # Per-boot control token, sidecar state persistence
+├── state.rs             # Per-boot control token, tool/auth/logging sidecar persistence
 └── tools/
     ├── inspect.rs       # file_info, file_head, file_tail, file_read_lines
     ├── search.rs        # file_search, file_grep, file_search_replace_preview
@@ -555,7 +583,7 @@ This ensures that even if a tool produces a large result, the context window imp
 ```bash
 cargo build              # Debug build
 cargo build --release    # Optimized, stripped, LTO-enabled release build
-cargo test               # Run all tests (~331 tests)
+cargo test               # Run all tests (~371 tests)
 cargo clippy             # Lint (zero warnings policy)
 cargo fmt                # Format
 cargo audit              # Dependency vulnerability scan (zero advisories)
@@ -598,6 +626,7 @@ codegen-units = 1
 
 | Version | Changes |
 |---------|---------|
+| **v0.6.0** | **Dashboard & analytics overhaul.** Control-plane dashboard enhanced with: an analytics subsystem (per-tool/per-repo byte and token tracking, presentation-vs-content split, configurable JSONL audit log with daily rotation and retention, session/day/week/month rollups, JSONL export); a vertical latency histogram with multi-period comparison (recent window from polling deltas, 24h/7d from JSONL aggregation); time-series sparklines (requests, errors, RSS, latency); an error-rate card with threshold coloring; activity-feed scroll and line-limit controls; auto-refresh interval selector; tool descriptions in the inventory (ⓘ tooltips); server restart/stop with graceful Shawl integration and recovery instructions; a structured log viewer with per-file download, retention cleanup, and a dashboard logging toggle; MCP auth-token management via a sidecar (`surgicalfs-auth.token`); a tunnel connection-trace display; and footer auth/mode status. Dashboard refactored: CSS and JS externalized into served assets (`/dashboard.css`, `/dashboard.js`). New config sections: `[analytics]` (JSONL log, retention, token estimation), `[dashboard]` (tunnel URL); `[logging] retention_days` is now active. 371 tests, 47 tools (unchanged). |
 | **v0.5.0** | **Major reliability overhaul.** Native HTTP transport replaces Node/supergateway bridge — single Rust process, zero per-request spawning. Control plane: localhost dashboard with live metrics, SSE activity stream, and runtime tool toggle. SharedState architecture: lock-free metrics (request counters, latency histogram, process self-watch), concurrency semaphore, broadcast event bus. Sidecar tool-toggle persistence (survives restart). Structured rolling-JSON logging. Atomic writes for all file mutations. Self-maintenance: orphaned temp-file sweep. Windows Service support via Shawl. 331 tests, 47 tools (unchanged). |
 | **v0.4.2** | Idle self-reap to prevent orphaned processes behind stateless `supergateway` on Windows. New `[runtime] idle_timeout_secs` config + `--idle-timeout-secs` CLI flag (default 0 = off; local clients unaffected). Lifecycle logic consolidated into `src/lifecycle.rs` with an in-flight guard so a process is never reaped mid-response. |
 | **v0.4.1** | Security audit fixes: integer overflow in `file_grep` pagination (switched to `saturating_add`). Config validation for empty/invalid tool category names. Updated tool descriptions for `expected_content`. Edge case tests for CRLF content verification and overflow saturation. |
@@ -615,6 +644,7 @@ codegen-units = 1
 ## Roadmap
 
 - [x] **HTTP transport + control plane** — remote access, monitoring dashboard, runtime tool toggle (v0.5.0)
+- [x] **Analytics dashboard + token tracking** — per-tool/per-repo analytics, latency histogram, sparklines, log viewer, auth management (v0.6.0)
 - [ ] **MCP Roots protocol support** — dynamic directory updates from clients without server restart
 - [ ] **File diff tool** — unified diff between two files for code review workflows
 - [ ] **ZIP/archive support** — create and extract archives

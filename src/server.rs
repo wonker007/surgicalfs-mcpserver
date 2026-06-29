@@ -506,8 +506,9 @@ impl SurgicalFsServer {
     pub fn new(config: Config, path_guard: PathGuard) -> Self {
         // Legacy/stdio path: the config source path isn't threaded here, so the
         // control plane's `config_source` is `None` (HTTP mode supplies it via
-        // `new_with_shared` + `SharedState::new`).
-        let shared = std::sync::Arc::new(crate::shared::SharedState::new(&config, None));
+        // `new_with_shared` + `SharedState::new`). `shutdown_tx` is `None` — the
+        // stdio path never uses the HTTP shutdown channel.
+        let shared = std::sync::Arc::new(crate::shared::SharedState::new(&config, None, None));
         Self::new_with_shared(config, path_guard, shared)
     }
 
@@ -533,6 +534,31 @@ impl SurgicalFsServer {
     /// Clone of the activity tracker, handed to the idle watchdog in main().
     pub fn activity_handle(&self) -> std::sync::Arc<crate::lifecycle::ActivityTracker> {
         self.shared.activity.clone()
+    }
+
+    /// Shared process state, for the HTTP handler's analytics instrumentation
+    /// (Phase 2). The stdio path never calls this.
+    pub fn shared(&self) -> &std::sync::Arc<crate::shared::SharedState> {
+        &self.shared
+    }
+
+    /// Extract every tool's `#[tool(description = …)]` text as a
+    /// `tool_name → description` map covering the WHOLE tool surface (all tools,
+    /// enabled or not — unlike `list_tools`, which filters by `enabled_tools`).
+    /// Called once in `run_http` to populate `SharedState::tool_descriptions` for
+    /// the control plane's `GET /admin/tools`. A tool without a description maps to
+    /// an empty string.
+    pub fn all_tool_descriptions(&self) -> std::collections::HashMap<String, String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                (
+                    t.name.to_string(),
+                    t.description.as_deref().unwrap_or("").to_string(),
+                )
+            })
+            .collect()
     }
 
     /// Apply response budget to tool output.
@@ -1271,9 +1297,11 @@ impl ServerHandler for SurgicalFsServer {
         // (none until Stage 3) — this avoids Debug-formatting the (budget-capped,
         // up to ~32 KiB) response on the hot path only to drop the event.
         if self.shared.event_bus.receiver_count() > 0 {
+            // Actual serialized JSON length (not Debug-format), matching what the
+            // HTTP client receives and what the analytics path measures (Phase 2).
             let result_size = result
                 .as_ref()
-                .map(|r| format!("{:?}", r).len())
+                .map(|r| serde_json::to_string(r).map(|s| s.len()).unwrap_or(0))
                 .unwrap_or(0);
             let _ = self
                 .shared

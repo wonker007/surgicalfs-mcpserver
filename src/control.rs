@@ -24,11 +24,11 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
-    http::{HeaderMap, HeaderName, Method, StatusCode},
+    extract::{Query, State},
+    http::{header, HeaderMap, HeaderName, Method, StatusCode},
     middleware::Next,
-    response::{sse::Event, sse::KeepAlive, sse::Sse, Html, Json, Response},
-    routing::get,
+    response::{sse::Event, sse::KeepAlive, sse::Sse, IntoResponse, Json, Response},
+    routing::{get, post},
     Router,
 };
 use serde_json::json;
@@ -146,6 +146,25 @@ async fn health_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_js
     }))
 }
 
+/// Resolve the EFFECTIVE MCP-auth state (Phase 3): the `surgicalfs-auth.token`
+/// sidecar overrides the TOML default. Returns `(enabled, source, sidecar_exists)`
+/// where `source` is `"sidecar"`, `"config"`, or `"none"`. Reads the sidecar fresh
+/// so the dashboard reflects staged changes (a restart applies them).
+fn auth_status(shared: &SharedState) -> (bool, &'static str, bool) {
+    let path = crate::state::auth_sidecar_path(shared.config_snapshot.config_source.as_deref());
+    match crate::state::read_auth_sidecar(&path) {
+        Some(token) => (!token.is_empty(), "sidecar", true),
+        None => {
+            let toml_enabled = shared.config_snapshot.auth_enabled;
+            (
+                toml_enabled,
+                if toml_enabled { "config" } else { "none" },
+                false,
+            )
+        }
+    }
+}
+
 /// `GET /ready` — frozen config snapshot + per-directory reachability.
 async fn ready_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_json::Value> {
     let cs = &shared.config_snapshot;
@@ -157,6 +176,7 @@ async fn ready_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_jso
             json!({ "path": d, "reachable": reachable })
         })
         .collect();
+    let (auth_enabled, _src, _exists) = auth_status(&shared);
 
     Json(json!({
         "ready": true,
@@ -165,7 +185,10 @@ async fn ready_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_jso
         "mcp_bind": cs.mcp_bind,
         "control_bind": cs.control_bind,
         "read_only": cs.read_only,
-        "auth_enabled": cs.auth_enabled,
+        "auth_enabled": auth_enabled,
+        "log_dir": cs.log_dir,
+        "retention_days": cs.retention_days,
+        "tunnel_url": cs.tunnel_url,
     }))
 }
 
@@ -400,16 +423,26 @@ async fn toggle_tools_handler(
     }))
 }
 
-/// `GET /admin/tools` — read-only tool inventory by category.
+/// `GET /admin/tools` — read-only tool inventory by category. Each tool carries
+/// its `description` (from `SharedState::tool_descriptions`, populated at startup
+/// from the compiled `#[tool(description = …)]` metadata); an unknown tool maps to
+/// an empty string.
 async fn tools_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_json::Value> {
     let enabled = shared.enabled_tools.read().unwrap();
+    let descriptions = shared.tool_descriptions.read().unwrap();
     let categories: Vec<serde_json::Value> = crate::config::ALL_TOOL_CATEGORIES
         .iter()
         .map(|cat| {
             let names = crate::config::tools_in_category(cat);
             let tools: Vec<serde_json::Value> = names
                 .iter()
-                .map(|t| json!({ "name": t, "enabled": enabled.contains(*t) }))
+                .map(|t| {
+                    json!({
+                        "name": t,
+                        "enabled": enabled.contains(*t),
+                        "description": descriptions.get(*t).map(String::as_str).unwrap_or(""),
+                    })
+                })
                 .collect();
             let enabled_in_cat = names.iter().filter(|t| enabled.contains(**t)).count();
             json!({
@@ -434,13 +467,489 @@ async fn tools_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_jso
     }))
 }
 
-/// `GET /dashboard` — serve the self-contained HTML with the token injected.
+/// `POST /admin/server` request: an action (`restart` or `stop`).
+#[derive(serde::Deserialize)]
+struct ServerControlRequest {
+    action: String,
+}
+
+/// `POST /admin/server` — trigger a graceful server shutdown. `restart` exits the
+/// process with code 1 so Shawl restarts the service; `stop` exits with code 0 so
+/// it does not (manual restart required). Both signal the same `run_http` watch
+/// channel (`SharedState::shutdown_tx`); the actual exit code is applied after both
+/// listeners drain. Auth-protected by `ctl_auth` like every other admin route.
+///
+/// Action is validated BEFORE the channel is touched, so an unknown action is a
+/// clean 400 even on a build with no shutdown channel (stdio/tests). A missing
+/// channel (should never happen on the control plane, which only runs in HTTP mode)
+/// is a defensive 500.
+async fn server_control_handler(
+    State(shared): State<Arc<SharedState>>,
+    Json(req): Json<ServerControlRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (reason, status, message) = match req.action.as_str() {
+        "restart" => (
+            crate::shared::ShutdownReason::Restart,
+            "restarting",
+            "Server is shutting down. Shawl will restart it automatically.",
+        ),
+        "stop" => (
+            crate::shared::ShutdownReason::Stop,
+            "stopping",
+            "Server is shutting down. Manual restart required (sc.exe start SurgicalFS-MCP).",
+        ),
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Unknown action: {other}. Use 'restart' or 'stop'."),
+            ));
+        }
+    };
+
+    let tx = shared.shutdown_tx.as_ref().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "Shutdown channel not configured (server not running in HTTP mode)".to_string(),
+    ))?;
+    // Best-effort: a send failure means every receiver was already dropped, i.e. a
+    // shutdown is already in progress — nothing more to do.
+    let _ = tx.send(Some(reason));
+    tracing::info!("Control plane requested shutdown: {reason:?}");
+
+    Ok(Json(json!({ "status": status, "message": message })))
+}
+
+/// `GET /analytics` — aggregated analytics (Phase 2): session totals, on-demand
+/// day/week/month rollups (read from the daily JSONL files), per-tool and per-repo
+/// breakdowns, and the presentation-vs-content split. The file reads run on the
+/// blocking pool (`spawn_blocking`) so the rollup never stalls an async worker.
+/// FULL paths flow through here — operator-only by design (localhost + ctl auth).
+async fn analytics_handler(State(shared): State<Arc<SharedState>>) -> Response {
+    let s = shared.clone();
+    match tokio::task::spawn_blocking(move || s.analytics.aggregate()).await {
+        Ok(r) => Json(serde_json::to_value(r).unwrap_or(serde_json::Value::Null)).into_response(),
+        Err(e) => {
+            // Return a non-2xx so the dashboard's `if (!r.ok)` path surfaces the
+            // failure instead of silently rendering an empty panel.
+            tracing::error!("analytics aggregation task failed: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "aggregation failed" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /analytics/export?range=today|week|month|all` query.
+#[derive(serde::Deserialize)]
+struct ExportQuery {
+    range: Option<String>,
+}
+
+/// `GET /analytics/export` — raw JSONL download for offline analysis. Returns the
+/// concatenated daily files for the requested range as `application/x-ndjson` with
+/// an attachment disposition. Empty body when logging is disabled.
+async fn analytics_export_handler(
+    State(shared): State<Arc<SharedState>>,
+    Query(q): Query<ExportQuery>,
+) -> Response {
+    let range = q.range.unwrap_or_else(|| "today".to_string());
+    let s = shared.clone();
+    let body = tokio::task::spawn_blocking(move || s.analytics.export_range(&range))
+        .await
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/x-ndjson"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"surgicalfs-analytics.jsonl\"",
+            ),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+// ─── Activity log viewer (Phase 3) ─────────────────────────────────────────────
+
+/// `GET /logs?lines=N` query (default 100, capped at 500).
+#[derive(serde::Deserialize)]
+struct LogsQuery {
+    lines: Option<usize>,
+}
+
+/// `GET /logs` — list `surgicalfs.log.*` files (newest first) + the tail of the
+/// current day's file. Returns `{enabled:false,...}` when file logging is off. The
+/// directory scan + file read run on the blocking pool.
+async fn logs_handler(
+    State(shared): State<Arc<SharedState>>,
+    Query(q): Query<LogsQuery>,
+) -> Json<serde_json::Value> {
+    let log_dir = shared.config_snapshot.log_dir.clone();
+    let lines = q.lines.unwrap_or(100).min(500);
+    let v = tokio::task::spawn_blocking(move || read_logs(&log_dir, lines))
+        .await
+        .unwrap_or_else(|_| json!({ "enabled": false, "files": [], "tail": [] }));
+    Json(v)
+}
+
+/// Blocking: enumerate `surgicalfs.log.YYYY-MM-DD` files and tail the newest.
+fn read_logs(log_dir: &str, lines: usize) -> serde_json::Value {
+    if log_dir.is_empty() {
+        return json!({ "enabled": false, "log_dir": "", "files": [], "tail": [] });
+    }
+    let dir = std::path::Path::new(log_dir);
+    // (name, size, date) for each valid log file.
+    let mut files: Vec<(String, u64, String)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if let Some(date) = name.strip_prefix("surgicalfs.log.") {
+                if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
+                    let date_owned = date.to_string();
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    files.push((name, size, date_owned));
+                }
+            }
+        }
+    }
+    files.sort_by(|a, b| b.2.cmp(&a.2)); // date descending → newest first
+
+    // Tail the newest file. Daily rotation bounds each file's TIME span (one day),
+    // not its size; reading it whole is fine for this low-volume operator log on a
+    // localhost-only endpoint (a busy day could be optimized to a bounded tail read).
+    let tail: Vec<String> = match files.first() {
+        Some((name, _, _)) => match std::fs::read_to_string(dir.join(name)) {
+            Ok(content) => {
+                let all: Vec<&str> = content.lines().collect();
+                let start = all.len().saturating_sub(lines);
+                all[start..].iter().map(|s| s.to_string()).collect()
+            }
+            Err(_) => Vec::new(),
+        },
+        None => Vec::new(),
+    };
+
+    let files_json: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(n, s, d)| json!({ "name": n, "size_bytes": s, "date": d }))
+        .collect();
+    json!({ "enabled": true, "log_dir": log_dir, "files": files_json, "tail": tail })
+}
+
+/// `GET /logs/download?file=...` query.
+#[derive(serde::Deserialize)]
+struct LogDownloadQuery {
+    file: String,
+}
+
+/// `GET /logs/download` — download one log file as `text/plain` attachment. The
+/// filename is strictly validated (`surgicalfs.log.YYYY-MM-DD`, no separators or
+/// `..`) to block path traversal; unknown files 404.
+async fn logs_download_handler(
+    State(shared): State<Arc<SharedState>>,
+    Query(q): Query<LogDownloadQuery>,
+) -> Response {
+    let file = q.file;
+    // Validate: exact prefix + a parseable date, and no path components.
+    let valid = !file.contains('/')
+        && !file.contains('\\')
+        && !file.contains("..")
+        && file
+            .strip_prefix("surgicalfs.log.")
+            .map(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok())
+            .unwrap_or(false);
+    if !valid {
+        return (StatusCode::BAD_REQUEST, "invalid log filename").into_response();
+    }
+    let log_dir = shared.config_snapshot.log_dir.clone();
+    if log_dir.is_empty() {
+        return (StatusCode::NOT_FOUND, "logging disabled").into_response();
+    }
+    let path = std::path::Path::new(&log_dir).join(&file);
+    match tokio::task::spawn_blocking(move || std::fs::read(path)).await {
+        Ok(Ok(bytes)) => (
+            StatusCode::OK,
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8".to_string(),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{file}\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        _ => (StatusCode::NOT_FOUND, "log file not found").into_response(),
+    }
+}
+
+// ─── MCP auth-token management (Phase 3) ───────────────────────────────────────
+
+const AUTH_NOTE: &str = "Claude.ai web connector does not support custom Authorization headers \
+     (DEC-DRAFT-W). This token works for Claude Desktop, Claude Code, and API clients.";
+
+/// `GET /admin/auth` — current MCP-auth status (enabled / source / sidecar_exists).
+async fn admin_auth_get_handler(State(shared): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let (enabled, source, sidecar_exists) = auth_status(&shared);
+    Json(json!({
+        "enabled": enabled,
+        "source": source,
+        "sidecar_exists": sidecar_exists,
+        "note": AUTH_NOTE,
+    }))
+}
+
+/// `POST /admin/auth` request: an action plus an optional token (for `set`).
+#[derive(serde::Deserialize)]
+struct AuthActionRequest {
+    action: String,
+    token: Option<String>,
+}
+
+/// `POST /admin/auth` — manage the MCP-auth sidecar. `generate` mints a random
+/// token, `set` writes a provided one, `clear` removes the sidecar (reset to the
+/// TOML default). All require a server restart to take effect (the token is read
+/// at startup into `AppState`), so every success carries `restart_required: true`.
+async fn admin_auth_post_handler(
+    State(shared): State<Arc<SharedState>>,
+    Json(req): Json<AuthActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let path = crate::state::auth_sidecar_path(shared.config_snapshot.config_source.as_deref());
+    match req.action.as_str() {
+        "generate" => {
+            let token = crate::state::generate_ctl_token();
+            crate::state::write_auth_sidecar(&path, &token).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write failed: {e}"),
+                )
+            })?;
+            Ok(Json(
+                json!({ "action": "generate", "token": token, "restart_required": true }),
+            ))
+        }
+        "set" => {
+            let token = req.token.unwrap_or_default();
+            if token.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "set requires a non-empty 'token' (use 'clear' to disable auth)".to_string(),
+                ));
+            }
+            crate::state::write_auth_sidecar(&path, &token).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write failed: {e}"),
+                )
+            })?;
+            Ok(Json(
+                json!({ "action": "set", "token": token, "restart_required": true }),
+            ))
+        }
+        "clear" => {
+            crate::state::clear_auth_sidecar(&path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("clear failed: {e}"),
+                )
+            })?;
+            Ok(Json(json!({ "action": "clear", "restart_required": true })))
+        }
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("Unknown action: {other}. Use 'generate', 'set', or 'clear'."),
+        )),
+    }
+}
+
+// ─── Logging management (Phase 4) ──────────────────────────────────────────────
+
+/// Effective logging state: the `surgicalfs-logging.json` sidecar overrides the
+/// TOML `[logging]`. Returns (enabled, log_dir, retention_days, source,
+/// sidecar_exists, restart_required). `restart_required` is true when the
+/// CONFIGURED (sidecar) state differs from the boot-effective `ConfigSnapshot`
+/// (i.e. a change is staged but the running server hasn't picked it up).
+fn logging_status(shared: &SharedState) -> (bool, String, u32, &'static str, bool, bool) {
+    let cs = &shared.config_snapshot;
+    let path = crate::state::logging_sidecar_path(cs.config_source.as_deref());
+    match crate::state::read_logging_sidecar(&path) {
+        Some(sc) => {
+            let restart = sc.log_dir != cs.log_dir || sc.retention_days != cs.retention_days;
+            (
+                !sc.log_dir.is_empty(),
+                sc.log_dir,
+                sc.retention_days,
+                "sidecar",
+                true,
+                restart,
+            )
+        }
+        None => (
+            !cs.log_dir.is_empty(),
+            cs.log_dir.clone(),
+            cs.retention_days,
+            "config",
+            false,
+            false,
+        ),
+    }
+}
+
+/// `GET /admin/logging` — current logging status (sidecar-aware).
+async fn admin_logging_get_handler(
+    State(shared): State<Arc<SharedState>>,
+) -> Json<serde_json::Value> {
+    let (enabled, log_dir, retention, source, sidecar_exists, restart) = logging_status(&shared);
+    Json(json!({
+        "enabled": enabled,
+        "log_dir": log_dir,
+        "retention_days": retention,
+        "source": source,
+        "sidecar_exists": sidecar_exists,
+        "restart_required": restart,
+    }))
+}
+
+/// `POST /admin/logging` request: `enable` (optionally with a dir/retention) or
+/// `disable`.
+#[derive(serde::Deserialize)]
+struct LoggingActionRequest {
+    action: String,
+    log_dir: Option<String>,
+    retention_days: Option<u32>,
+}
+
+/// `POST /admin/logging` — enable/disable file logging via the sidecar. `enable`
+/// defaults to `<config parent>/logs` with 30-day retention, creating the dir;
+/// `disable` deletes the sidecar (reset to the TOML default). Both need a restart
+/// (logging is initialized at startup), so they carry `restart_required: true`.
+async fn admin_logging_post_handler(
+    State(shared): State<Arc<SharedState>>,
+    Json(req): Json<LoggingActionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let cs = &shared.config_snapshot;
+    let path = crate::state::logging_sidecar_path(cs.config_source.as_deref());
+    match req.action.as_str() {
+        "enable" => {
+            let default_dir = cs
+                .config_source
+                .as_deref()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("logs"))
+                .unwrap_or_else(|| std::env::temp_dir().join("surgicalfs-logs"));
+            let log_dir = req
+                .log_dir
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| default_dir.to_string_lossy().to_string());
+            let retention = req.retention_days.unwrap_or(30);
+            // Phase 4.5: enable BOTH tracing logs and analytics JSONL from one
+            // toggle. They share the directory (distinct file naming:
+            // surgicalfs.log.* vs surgicalfs-analytics-*.jsonl). Analytics keeps its
+            // own 90-day default retention.
+            let analytics_dir = log_dir.clone();
+            let analytics_retention = 90;
+            // Create the directory now so logging works on the next boot.
+            std::fs::create_dir_all(&log_dir).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("could not create log dir: {e}"),
+                )
+            })?;
+            crate::state::write_logging_sidecar(
+                &path,
+                &log_dir,
+                retention,
+                &analytics_dir,
+                analytics_retention,
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("write failed: {e}"),
+                )
+            })?;
+            Ok(Json(json!({
+                "action": "enable",
+                "log_dir": log_dir,
+                "analytics_log_dir": analytics_dir,
+                "retention_days": retention,
+                "restart_required": true,
+            })))
+        }
+        "disable" => {
+            crate::state::clear_logging_sidecar(&path).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("clear failed: {e}"),
+                )
+            })?;
+            Ok(Json(
+                json!({ "action": "disable", "restart_required": true }),
+            ))
+        }
+        other => Err((
+            StatusCode::BAD_REQUEST,
+            format!("Unknown action: {other}. Use 'enable' or 'disable'."),
+        )),
+    }
+}
+
+// ─── Dashboard assets (Phase 4: CSS/JS externalized from the HTML) ─────────────
+
+/// `Cache-Control: no-cache` for all three dashboard responses — the browser may
+/// cache but MUST revalidate each load, so a binary rebuild always wins on refresh.
+const DASH_CACHE: &str = "no-cache";
+
+/// `GET /dashboard` — serve the slim HTML skeleton with the per-boot token injected.
 /// Unauthenticated by design: the page *is* how the operator obtains the token.
 /// Template injection is not an auth bypass — the control routes still validate
 /// every request's bearer/query token.
-async fn dashboard_handler(State(ctl_token): State<String>) -> Html<String> {
-    let html = include_str!("../dashboard.html");
-    Html(html.replace("__SURGICALFS_CTL_TOKEN__", &ctl_token))
+async fn dashboard_handler(State(ctl_token): State<String>) -> Response {
+    let html = include_str!("../dashboard.html").replace("__SURGICALFS_CTL_TOKEN__", &ctl_token);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, DASH_CACHE),
+        ],
+        html,
+    )
+        .into_response()
+}
+
+/// `GET /dashboard.css` — static stylesheet (unauthenticated, like `/dashboard`).
+async fn dashboard_css_handler() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, DASH_CACHE),
+        ],
+        include_str!("../dashboard.css"),
+    )
+        .into_response()
+}
+
+/// `GET /dashboard.js` — static script (unauthenticated, like `/dashboard`).
+async fn dashboard_js_handler() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (
+                header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (header::CACHE_CONTROL, DASH_CACHE),
+        ],
+        include_str!("../dashboard.js"),
+    )
+        .into_response()
 }
 
 // ─── Router assembly ─────────────────────────────────────────────────────────
@@ -459,6 +968,19 @@ pub fn control_router(shared: Arc<SharedState>, ctl_token: String, control_bind:
             "/admin/tools",
             get(tools_handler).post(toggle_tools_handler),
         )
+        .route("/admin/server", post(server_control_handler))
+        .route(
+            "/admin/auth",
+            get(admin_auth_get_handler).post(admin_auth_post_handler),
+        )
+        .route(
+            "/admin/logging",
+            get(admin_logging_get_handler).post(admin_logging_post_handler),
+        )
+        .route("/analytics", get(analytics_handler))
+        .route("/analytics/export", get(analytics_export_handler))
+        .route("/logs", get(logs_handler))
+        .route("/logs/download", get(logs_download_handler))
         .layer(axum::middleware::from_fn_with_state(
             ctl_token.clone(),
             ctl_auth,
@@ -466,8 +988,12 @@ pub fn control_router(shared: Arc<SharedState>, ctl_token: String, control_bind:
         .layer(ctl_cors(control_bind))
         .with_state(shared);
 
+    // Unauthenticated dashboard assets (the page is how the operator gets the
+    // token). CSS/JS handlers ignore the `State<String>` token.
     let public = Router::new()
         .route("/dashboard", get(dashboard_handler))
+        .route("/dashboard.css", get(dashboard_css_handler))
+        .route("/dashboard.js", get(dashboard_js_handler))
         .with_state(ctl_token);
 
     authed.merge(public)
@@ -485,7 +1011,7 @@ mod tests {
     fn test_shared() -> Arc<SharedState> {
         let tmp = std::env::temp_dir().to_string_lossy().to_string();
         let cfg = crate::config::Config::from_directories(vec![tmp]).unwrap();
-        Arc::new(SharedState::new(&cfg, None))
+        Arc::new(SharedState::new(&cfg, None, None))
     }
 
     fn app() -> Router {
@@ -733,7 +1259,7 @@ mod tests {
         let tmp = std::env::temp_dir().to_string_lossy().to_string();
         let mut cfg = crate::config::Config::from_directories(vec![tmp]).unwrap();
         cfg.security.read_only = true;
-        Arc::new(SharedState::new(&cfg, None))
+        Arc::new(SharedState::new(&cfg, None, None))
     }
 
     async fn post_toggle(shared: Arc<SharedState>, body: &str) -> (StatusCode, serde_json::Value) {
@@ -924,7 +1450,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = crate::config::Config::from_directories(vec![dir.to_string_lossy().to_string()])
             .unwrap();
-        let shared = Arc::new(SharedState::new(&cfg, Some(dir.join("surgicalfs.toml"))));
+        let shared = Arc::new(SharedState::new(
+            &cfg,
+            Some(dir.join("surgicalfs.toml")),
+            None,
+        ));
 
         let (st, v) = post_toggle(shared, r#"{"action":"set","targets":["json"]}"#).await;
         assert_eq!(st, StatusCode::OK);
@@ -939,6 +1469,495 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(reloaded, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── GET /admin/tools descriptions (Phase 1) ──
+
+    #[tokio::test]
+    async fn admin_tools_includes_descriptions() {
+        let shared = test_shared();
+        // Populate one known description (run_http does this from compiled metadata).
+        shared.tool_descriptions.write().unwrap().insert(
+            "file_info".to_string(),
+            "Get file metadata (test)".to_string(),
+        );
+
+        let router = control_router(shared, TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(req("/admin/tools", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+
+        let inspect = v["categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["category"] == "inspect")
+            .unwrap();
+        let file_info = inspect["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "file_info")
+            .unwrap();
+        assert_eq!(file_info["description"], "Get file metadata (test)");
+        // Tools without a populated description fall back to an empty string.
+        let file_head = inspect["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "file_head")
+            .unwrap();
+        assert_eq!(file_head["description"], "");
+    }
+
+    // ── POST /admin/server (Phase 1) ──
+
+    /// SharedState wired with a shutdown channel; returns the live receiver so the
+    /// test can observe the signal the handler sends.
+    fn shared_with_shutdown() -> (
+        Arc<SharedState>,
+        tokio::sync::watch::Receiver<Option<crate::shared::ShutdownReason>>,
+    ) {
+        let (tx, rx) = tokio::sync::watch::channel(None::<crate::shared::ShutdownReason>);
+        let tmp = std::env::temp_dir().to_string_lossy().to_string();
+        let cfg = crate::config::Config::from_directories(vec![tmp]).unwrap();
+        (Arc::new(SharedState::new(&cfg, None, Some(tx))), rx)
+    }
+
+    #[tokio::test]
+    async fn admin_server_restart_sends_shutdown() {
+        let (shared, mut rx) = shared_with_shutdown();
+        let router = control_router(shared, TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/server",
+                Some(TOK),
+                true,
+                r#"{"action":"restart"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "restarting");
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some(crate::shared::ShutdownReason::Restart));
+    }
+
+    #[tokio::test]
+    async fn admin_server_stop_sends_shutdown() {
+        let (shared, mut rx) = shared_with_shutdown();
+        let router = control_router(shared, TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/server",
+                Some(TOK),
+                true,
+                r#"{"action":"stop"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["status"], "stopping");
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow(), Some(crate::shared::ShutdownReason::Stop));
+    }
+
+    #[tokio::test]
+    async fn admin_server_unknown_action_returns_400() {
+        // Action is validated before the channel is touched, so even test_shared
+        // (no shutdown channel) yields a clean 400, not a 500.
+        let router = control_router(test_shared(), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/server",
+                Some(TOK),
+                true,
+                r#"{"action":"explode"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_server_requires_auth() {
+        let router = control_router(test_shared(), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/server",
+                None,
+                true,
+                r#"{"action":"restart"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_server_requires_ctl_header() {
+        // CSRF defense: a valid bearer without `X-SurgicalFS-Ctl: 1` is forbidden —
+        // pins the requirement for the state-changing restart/stop route.
+        let router = control_router(test_shared(), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/server",
+                Some(TOK),
+                false,
+                r#"{"action":"restart"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── GET /analytics + /analytics/export (Phase 2) ──
+
+    #[tokio::test]
+    async fn analytics_endpoint_returns_session_data() {
+        let resp = app()
+            .oneshot(req("/analytics", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        // Session is always present; per-tool/per-repo are arrays; presentation
+        // and logging status are present. Logging is disabled on test_shared.
+        assert!(v["session"]["total_calls"].is_number());
+        assert!(v["per_tool"].is_array());
+        assert!(v["per_repo"].is_array());
+        assert!(v["presentation"]["calls"].is_number());
+        assert_eq!(v["logging_enabled"], false);
+        // Day/week/month are null when logging is disabled.
+        assert!(v["today"].is_null());
+        assert!(v["chars_per_token"].as_f64().unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn analytics_export_returns_ndjson() {
+        let resp = app()
+            .oneshot(req("/analytics/export?range=today", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("application/x-ndjson"), "content-type: {ct}");
+    }
+
+    #[tokio::test]
+    async fn analytics_requires_auth() {
+        let resp = app().oneshot(req("/analytics", None, true)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── /logs + /admin/auth (Phase 3) ──
+
+    /// Unique temp dir per test (avoids cross-test races on the sidecar/log files).
+    fn unique_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sfs-ctl-p3-{tag}-{}-{}",
+            std::process::id(),
+            crate::state::generate_ctl_token().get(..8).unwrap_or("x")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// SharedState whose config has `[logging] log_dir` = `dir` and config source =
+    /// `dir/surgicalfs.toml` (so the auth sidecar resolves next to it).
+    fn shared_with_logdir(dir: &std::path::Path) -> Arc<SharedState> {
+        let tmp = std::env::temp_dir().to_string_lossy().to_string();
+        let mut cfg = crate::config::Config::from_directories(vec![tmp]).unwrap();
+        cfg.logging.log_dir = dir.to_string_lossy().to_string();
+        cfg.logging.retention_days = 30;
+        Arc::new(SharedState::new(
+            &cfg,
+            Some(dir.join("surgicalfs.toml")),
+            None,
+        ))
+    }
+
+    #[tokio::test]
+    async fn logs_endpoint_returns_file_list() {
+        let dir = unique_dir("logs");
+        // Two daily log files; the newer one is tailed.
+        std::fs::write(
+            dir.join("surgicalfs.log.2026-06-13"),
+            "old line 1\nold line 2\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("surgicalfs.log.2026-06-14"),
+            "{\"level\":\"INFO\",\"message\":\"hello\"}\n{\"level\":\"WARN\",\"message\":\"bye\"}\n",
+        )
+        .unwrap();
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(req("/logs?lines=50", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["enabled"], true);
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+        // Newest first.
+        assert_eq!(files[0]["name"], "surgicalfs.log.2026-06-14");
+        assert!(files[0]["size_bytes"].as_u64().unwrap() > 0);
+        let tail = v["tail"].as_array().unwrap();
+        assert_eq!(tail.len(), 2); // the newest file has 2 lines
+        assert!(tail[1].as_str().unwrap().contains("bye"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn logs_endpoint_disabled_when_no_log_dir() {
+        let resp = app().oneshot(req("/logs", Some(TOK), true)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["files"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn logs_download_validates_filename() {
+        // Path traversal attempt → 400, never touches the filesystem.
+        let resp = app()
+            .oneshot(req("/logs/download?file=../../etc/passwd", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // A bogus-but-shaped name → also rejected (not a valid date).
+        let resp2 = app()
+            .oneshot(req(
+                "/logs/download?file=surgicalfs.log.not-a-date",
+                Some(TOK),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_get_reports_status() {
+        // Fresh dir (no sidecar) + no TOML auth_token → disabled / none.
+        let dir = unique_dir("authget");
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(req("/admin/auth", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["enabled"], false);
+        assert_eq!(v["source"], "none");
+        assert_eq!(v["sidecar_exists"], false);
+        assert!(v["note"].as_str().unwrap().contains("Claude.ai"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_generate_writes_sidecar() {
+        let dir = unique_dir("authgen");
+        let shared = shared_with_logdir(&dir);
+        let router = control_router(shared, TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/auth",
+                Some(TOK),
+                true,
+                r#"{"action":"generate"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["action"], "generate");
+        assert_eq!(v["restart_required"], true);
+        assert!(v["token"].as_str().unwrap().len() >= 40);
+        // The sidecar file was written next to the config.
+        let sidecar = dir.join("surgicalfs-auth.token");
+        assert!(sidecar.exists(), "auth sidecar not written");
+        assert_eq!(
+            std::fs::read_to_string(&sidecar).unwrap(),
+            v["token"].as_str().unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_clear_removes_sidecar() {
+        let dir = unique_dir("authclear");
+        // Pre-write a sidecar.
+        crate::state::write_auth_sidecar(&dir.join("surgicalfs-auth.token"), "preset").unwrap();
+        let shared = shared_with_logdir(&dir);
+        let router = control_router(shared, TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/auth",
+                Some(TOK),
+                true,
+                r#"{"action":"clear"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["action"], "clear");
+        assert!(
+            !dir.join("surgicalfs-auth.token").exists(),
+            "auth sidecar should be removed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_requires_auth() {
+        // The state-changing route must be behind ctl auth.
+        let resp = app()
+            .oneshot(post_req(
+                "/admin/auth",
+                None,
+                true,
+                r#"{"action":"generate"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Dashboard assets + /admin/logging (Phase 4) ──
+
+    fn content_type(resp: &Response) -> String {
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn dashboard_css_serves_content_type() {
+        // Unauthenticated (None bearer, no ctl header), like /dashboard.
+        let resp = app()
+            .oneshot(req("/dashboard.css", None, false))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(content_type(&resp).starts_with("text/css"));
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        assert!(!bytes.is_empty(), "css body should be non-empty");
+    }
+
+    #[tokio::test]
+    async fn dashboard_js_serves_content_type() {
+        let resp = app()
+            .oneshot(req("/dashboard.js", None, false))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(content_type(&resp).starts_with("application/javascript"));
+    }
+
+    #[tokio::test]
+    async fn dashboard_assets_need_no_auth() {
+        // Both assets are reachable with NO auth headers at all (200, not 401/403).
+        for path in ["/dashboard.css", "/dashboard.js"] {
+            let resp = app().oneshot(req(path, None, false)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{path} should need no auth");
+            // And carry the revalidation cache header.
+            let cc = resp
+                .headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert_eq!(cc, "no-cache", "{path} cache-control");
+        }
+    }
+
+    #[tokio::test]
+    async fn admin_logging_get_reports_status() {
+        // shared_with_logdir sets [logging] log_dir → enabled, source "config".
+        let dir = unique_dir("logget");
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(req("/admin/logging", Some(TOK), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["enabled"], true);
+        assert_eq!(v["source"], "config");
+        assert_eq!(v["sidecar_exists"], false);
+        assert!(v["log_dir"].is_string());
+        assert!(v["retention_days"].is_number());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_logging_enable_writes_sidecar() {
+        let dir = unique_dir("logenable");
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/logging",
+                Some(TOK),
+                true,
+                r#"{"action":"enable"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["action"], "enable");
+        assert_eq!(v["restart_required"], true);
+        assert!(v["log_dir"].as_str().unwrap().ends_with("logs"));
+        // Phase 4.5: enable also sets analytics (same dir) and reports it back.
+        assert_eq!(v["analytics_log_dir"], v["log_dir"]);
+        // The sidecar was written next to the config, with both subsystems set.
+        let sidecar = dir.join("surgicalfs-logging.json");
+        assert!(sidecar.exists(), "logging sidecar not written");
+        let sc = crate::state::read_logging_sidecar(&sidecar).unwrap();
+        assert!(
+            !sc.analytics_log_dir.is_empty(),
+            "analytics dir not persisted"
+        );
+        assert_eq!(sc.analytics_log_dir, sc.log_dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn admin_logging_disable_clears_sidecar() {
+        let dir = unique_dir("logdisable");
+        // Pre-write a sidecar.
+        crate::state::write_logging_sidecar(&dir.join("surgicalfs-logging.json"), "X", 10, "", 90)
+            .unwrap();
+        let router = control_router(shared_with_logdir(&dir), TOK.to_string(), "127.0.0.1:9787");
+        let resp = router
+            .oneshot(post_req(
+                "/admin/logging",
+                Some(TOK),
+                true,
+                r#"{"action":"disable"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["action"], "disable");
+        assert!(
+            !dir.join("surgicalfs-logging.json").exists(),
+            "logging sidecar should be removed on disable"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

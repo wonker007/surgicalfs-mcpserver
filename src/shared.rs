@@ -4,16 +4,34 @@
 //! concurrency limiter, the event bus, and a frozen config snapshot, so the data
 //! plane (`call_tool`) and the Stage 3 control plane read a single source.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use tokio::sync::{broadcast, Mutex, Semaphore};
+use tokio::sync::{broadcast, watch, Mutex, Semaphore};
 
+use crate::analytics::AnalyticsStore;
 use crate::config::Config;
 use crate::lifecycle::ActivityTracker;
 use crate::metrics::MetricsRegistry;
 use crate::search_backend::SearchBackend;
+
+/// Why the HTTP server is shutting down. Carried by the `run_http` watch channel
+/// (`Option<ShutdownReason>`, where `None` = running) so the post-join exit code
+/// can distinguish an operator-requested restart from a stop or Ctrl+C:
+/// `Restart` → exit 1 (Shawl's `--restart-if-not 0` restarts), everything else
+/// → exit 0 (no restart). Only the HTTP path uses this; stdio never touches it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShutdownReason {
+    /// Ctrl+C / SIGINT — graceful drain, no automatic restart (exit 0).
+    CtrlC,
+    /// Operator clicked "Restart" (`POST /admin/server`) — exit 1 so Shawl
+    /// restarts the service automatically.
+    Restart,
+    /// Operator clicked "Stop" (`POST /admin/server`) — exit 0 so Shawl does NOT
+    /// restart; a manual `sc.exe start` is required.
+    Stop,
+}
 
 pub struct SharedState {
     /// Mutable tool set — `RwLock` for live toggling (Stage 4). The read lock is
@@ -55,13 +73,38 @@ pub struct SharedState {
     /// in-memory commit AND the sidecar file write so two concurrent toggles can't
     /// collide on the temp file or invert the persisted-vs-live order.
     pub sidecar_lock: Mutex<()>,
+
+    /// Tool-name → description map for the whole tool surface (all 47 tools,
+    /// enabled or not). Initialized empty in `new()` and populated ONCE in
+    /// `run_http` from the server's compiled `#[tool(description = …)]` metadata
+    /// after the server is built (it is constructed before the server, so the
+    /// descriptions can't be wired at construction time). Read by the control
+    /// plane's `GET /admin/tools`. `RwLock` only for that one-time post-build write.
+    pub tool_descriptions: RwLock<HashMap<String, String>>,
+
+    /// Shutdown signal sender (HTTP mode only). `Some` in the HTTP path so the
+    /// control plane's `POST /admin/server` can trigger a graceful shutdown with a
+    /// reason; `None` in stdio/legacy/test paths, which never use it. `None` carried
+    /// by the channel means "running"; a `Some(reason)` is the shutdown trigger.
+    pub shutdown_tx: Option<watch::Sender<Option<ShutdownReason>>>,
+
+    /// Analytics subsystem (Phase 2): per-tool/per-repo byte accounting,
+    /// presentation-vs-content split, and the daily JSONL audit log. Recorded into
+    /// only from the HTTP handler (`handler.rs`); inert under stdio.
+    pub analytics: AnalyticsStore,
 }
 
 impl SharedState {
     /// Build the shared state. `source_path` is the filesystem path the config was
     /// loaded from (for the control plane's `/ready` `config_source`); `None` in
     /// stdio/legacy/directory-argument paths where it is unknown or irrelevant.
-    pub fn new(config: &Config, source_path: Option<PathBuf>) -> Self {
+    /// `shutdown_tx` is the HTTP-path shutdown signal sender (`Some` only in
+    /// `run_http`); stdio/legacy/test paths pass `None`.
+    pub fn new(
+        config: &Config,
+        source_path: Option<PathBuf>,
+        shutdown_tx: Option<watch::Sender<Option<ShutdownReason>>>,
+    ) -> Self {
         // Tool-set construction (incl. read-only stripping) lives here so the
         // server's `new()`/`new_with_shared()` stay thin and both transports
         // build the same set.
@@ -135,6 +178,9 @@ impl SharedState {
             search_backend: Arc::new(SearchBackend::detect(&config.search.ripgrep_path)),
             state_file_path,
             sidecar_lock: Mutex::new(()),
+            tool_descriptions: RwLock::new(HashMap::new()),
+            shutdown_tx,
+            analytics: AnalyticsStore::new(&config.analytics, &config.security.allowed_directories),
         }
     }
 }
@@ -148,6 +194,16 @@ pub struct ConfigSnapshot {
     pub mcp_bind: String,
     pub control_bind: String,
     pub auth_enabled: bool,
+    /// Rolling-JSON log directory (`[logging] log_dir`), or empty when file logging
+    /// is off. Surfaced by `/ready` so the dashboard recovery panel can point an
+    /// operator at the logs (Phase 1, §6.2). Phase 3 also drives `/logs`.
+    pub log_dir: String,
+    /// Tracing-log retention in days (`[logging] retention_days`, 0 = unlimited).
+    /// Reported by `/ready`/`/logs` (Phase 3).
+    pub retention_days: u32,
+    /// Public tunnel URL (`[dashboard] tunnel_url`), empty when unset. Shown in the
+    /// dashboard connection trace (Phase 3).
+    pub tunnel_url: String,
     pub version: &'static str,
     /// Configured concurrency ceiling (the `concurrency` Semaphore's initial
     /// permits). Used by `/metrics` to report `in_flight` = max − available.
@@ -166,6 +222,9 @@ impl ConfigSnapshot {
             mcp_bind: config.server.bind.clone(),
             control_bind: config.server.control_bind.clone(),
             auth_enabled: !config.server.auth_token.is_empty(),
+            log_dir: config.logging.log_dir.clone(),
+            retention_days: config.logging.retention_days,
+            tunnel_url: config.dashboard.tunnel_url.clone(),
             version: env!("CARGO_PKG_VERSION"),
             max_concurrent_requests: config.server.max_concurrent_requests,
             start_time: Instant::now(),
@@ -252,7 +311,7 @@ mod tests {
     async fn tool_call_event_through_bus_leaks_no_content() {
         let tmp = std::env::temp_dir().to_string_lossy().to_string();
         let cfg = Config::from_directories(vec![tmp]).unwrap();
-        let shared = SharedState::new(&cfg, None);
+        let shared = SharedState::new(&cfg, None, None);
         let mut rx = shared.event_bus.subscribe();
 
         // Mirror call_tool's emission path with a content-bearing write.
@@ -305,6 +364,19 @@ mod tests {
         assert_eq!(v["total_count"], 47);
     }
 
+    #[test]
+    fn shutdown_reason_enum_values() {
+        // Each variant is distinct — the exit-code mapping in `run_http` relies on
+        // `Restart` being separable from `Stop` and `CtrlC`.
+        assert_ne!(ShutdownReason::Restart, ShutdownReason::Stop);
+        assert_ne!(ShutdownReason::Restart, ShutdownReason::CtrlC);
+        assert_ne!(ShutdownReason::Stop, ShutdownReason::CtrlC);
+        // Copy + PartialEq round-trip (used via `*watch_sender.borrow()`).
+        let r = ShutdownReason::Restart;
+        let copy = r;
+        assert_eq!(r, copy);
+    }
+
     /// Build a config whose source path is `dir/surgicalfs.toml` (so the sidecar
     /// resolves to `dir/surgicalfs-state.json`), allowing one allowed directory.
     fn cfg_with_source(dir: &std::path::Path) -> (Config, PathBuf) {
@@ -329,7 +401,7 @@ mod tests {
         crate::state::write_sidecar(&sidecar, &want).unwrap();
 
         let (cfg, source) = cfg_with_source(&dir);
-        let shared = SharedState::new(&cfg, Some(source));
+        let shared = SharedState::new(&cfg, Some(source), None);
         let enabled = shared.enabled_tools.read().unwrap().clone();
         assert_eq!(enabled, want, "sidecar should override the TOML defaults");
         let _ = std::fs::remove_dir_all(&dir);
@@ -353,7 +425,7 @@ mod tests {
 
         let (mut cfg, source) = cfg_with_source(&dir);
         cfg.security.read_only = true; // read-only must win over the sidecar
-        let shared = SharedState::new(&cfg, Some(source));
+        let shared = SharedState::new(&cfg, Some(source), None);
         let enabled = shared.enabled_tools.read().unwrap().clone();
         assert!(
             !enabled.contains("file_write"),

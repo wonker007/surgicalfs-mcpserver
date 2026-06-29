@@ -251,6 +251,32 @@ fn sweep_dir(dir: &std::path::Path, min_age: Duration) -> std::io::Result<usize>
     Ok(count)
 }
 
+/// Delete rolling tracing-log files (`surgicalfs.log.YYYY-MM-DD`) older than
+/// `retention_days` (Phase 3). 0 = unlimited (skip). Uses the date embedded in the
+/// filename — no `stat`. Best-effort; errors are ignored. Mirrors
+/// `analytics::cleanup_old_analytics_files`. Called on startup and from the
+/// 5-minute maintenance timer in `run_http`.
+pub fn cleanup_old_log_files(log_dir: &str, retention_days: u32) {
+    if log_dir.is_empty() || retention_days == 0 {
+        return;
+    }
+    let cutoff = chrono::Utc::now().date_naive() - chrono::Duration::days(retention_days as i64);
+    let rd = match std::fs::read_dir(std::path::Path::new(log_dir)) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if let Some(date_str) = name.strip_prefix("surgicalfs.log.") {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
+                if date < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 #[cfg(windows)]
 extern "system" {
     /// Win32 `PeekNamedPipe` — checks pipe state without consuming data.

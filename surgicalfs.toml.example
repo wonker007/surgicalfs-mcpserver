@@ -189,3 +189,57 @@ truncation_mode = "smart"
 #
 # Can also be set via CLI (overrides this value): surgicalfs-mcp --idle-timeout-secs 30
 # idle_timeout_secs = 0
+
+[logging]
+# ============================================================================
+# STRUCTURED FILE LOGGING (HTTP mode)
+# Rolling daily JSON log files. Independent of the analytics JSONL below.
+# Can also be toggled from the dashboard, which writes a surgicalfs-logging.json
+# override sidecar next to the config (delete it to revert to this TOML).
+# ============================================================================
+
+# Directory for daily log files (surgicalfs.log.YYYY-MM-DD). Empty (default) =
+# stderr only — backward compatible with every prior release.
+# log_dir = "C:\\Users\\James\\AppData\\Local\\Claude\\mcp\\logs"
+
+# Days to retain log files (default: 0 = keep forever). Older files are deleted
+# on startup and every 5 minutes. ACTIVE since v0.6.0 (was a placeholder before).
+# retention_days = 30
+
+[analytics]
+# ============================================================================
+# ANALYTICS (HTTP mode — operator-only)
+# Tracks response bytes / estimated tokens per tool and per repo, with an
+# append-only daily JSONL audit log and time-bucketed rollups surfaced on the
+# control plane's /analytics endpoint and the dashboard's Analytics section.
+#
+# SECURITY: the JSONL log and /analytics contain FULL file paths (for repo
+# aggregation). Both are operator-only — the JSONL file is a local artifact and
+# /analytics is on the localhost-only, token-authenticated control plane. The
+# redacted /events SSE stream is unaffected.
+# ============================================================================
+
+# Directory for daily JSONL analytics files. Empty (default) = analytics
+# logging DISABLED — only in-memory session counters run, no files are written
+# and the dashboard's day/week/month cards show "N/A". When set, daily files
+# are written as surgicalfs-analytics-YYYY-MM-DD.jsonl.
+# log_dir = "C:\\Users\\James\\AppData\\Local\\Claude\\mcp\\analytics"
+
+# Days to retain analytics files (default: 90). 0 = keep forever. Older files
+# are deleted on startup and every 5 minutes by the maintenance timer.
+# retention_days = 90
+
+# Characters-per-token estimate for the token display (default: 4.0).
+# chars_per_token = 4.0
+
+[dashboard]
+# ============================================================================
+# DASHBOARD DISPLAY (HTTP mode — informational only)
+# Settings that affect what the control-plane dashboard shows. They do NOT
+# change routing, auth, or any data-plane behavior.
+# ============================================================================
+
+# Public tunnel URL, shown in the dashboard's connection trace so an operator can
+# see the end-to-end path (Claude.ai -> CF edge -> cloudflared -> local binds).
+# Empty (default) = the trace shows only the local bind addresses.
+# tunnel_url = "https://your-tunnel-host.example.com/mcp"
