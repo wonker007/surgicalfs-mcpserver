@@ -8,3 +8,7 @@ surgicalfs.toml
 surgicalfs-ctl.token
 # Runtime tool-toggle sidecar (DEC-DRAFT-C) — runtime state, never git-tracked.
 surgicalfs-state.json
+# Persistent MCP-auth sidecar (Phase 3) — cleartext bearer secret, never git-tracked.
+surgicalfs-auth.token
+# Logging-config sidecar (Phase 4) — runtime state, never git-tracked.
+surgicalfs-logging.json
